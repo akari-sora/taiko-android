@@ -3,3 +3,18 @@
 .iosdd_mac/
 .iosdd_*/
 .DS_Store
+
+# Android diagnostics: local SDK paths, generated artifacts and credentials.
+dm/android/.gradle/
+dm/android/**/build/
+dm/android/**/.cxx/
+dm/android/local.properties
+*.apk
+*.aab
+*.jks
+*.keystore
+__pycache__/
+
+# User-supplied game content must never be committed.
+dm/android/game-files/
+.omx/

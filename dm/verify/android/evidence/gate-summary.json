@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "phase0Probes": "PASS",
+  "checks": [
+    {
+      "id": "abi",
+      "status": "PASS",
+      "detail": "Compiled for AArch64/AAPCS64; pointer bytes=8; original NSO ABI not validated"
+    },
+    {
+      "id": "wx",
+      "status": "PASS",
+      "detail": "Synthetic RW-to-RX return=42; recovered signal=0; no RWX requested; page size=4096"
+    },
+    {
+      "id": "x18",
+      "status": "PASS",
+      "detail": "Synthetic assembly host call preserves x18; compiled -ffixed-x18; upstream rewriter not executed"
+    },
+    {
+      "id": "hle",
+      "status": "PASS",
+      "detail": "ELF sw_hle entries=1; synthetic AAPCS64 gate allocates stack; not original dm_gate"
+    },
+    {
+      "id": "signal",
+      "status": "PASS",
+      "detail": "Scoped alternate-stack SIGUSR1 delivery and synchronous synthetic SIGILL recovery; handlers restored after probes"
+    },
+    {
+      "id": "tls",
+      "status": "PASS",
+      "detail": "pthread-local synthetic guest TLS is isolated; TPIDR_EL0 observed, never written; upstream TPIDRRO_EL0 rewriting not validated"
+    },
+    {
+      "id": "thread",
+      "status": "PASS",
+      "detail": "Synthetic pthread entry/exit return=42; create=0; join=0; original guest thread startup not tested"
+    },
+    {
+      "id": "vulkan",
+      "status": "PASS",
+      "detail": "Adreno (TM) 750; graphics queue=0; API=4206720; logical device created; no replay/present tested"
+    }
+  ],
+  "gates": {
+    "G0": "PASS",
+    "G1": "NOT_RUN",
+    "G2": "NOT_RUN",
+    "G3": "NOT_RUN",
+    "G4": "NOT_RUN",
+    "G5": "NOT_RUN",
+    "G6": "NOT_RUN"
+  },
+  "gamePlayable": false,
+  "limitations": [
+    "Only self-authored ARM64 fixtures were executed; no NSO or game assets.",
+    "Upstream loader, rewritten TLS, red-zone removal and guest stack signals remain untested.",
+    "Vulkan device creation is not NVN replay or frame validation."
+  ],
+  "apkSha256": "dd0948739a5264d885cce5a01c9df60a65261a1986255620eaf787692f336ad1",
+  "installation": {
+    "deviceModel": "SM-S9280",
+    "collectedUtc": "2026-10-12T11:49:35.0128573Z",
+    "apiLevel": 36,
+    "installedApkSha256": "dd0948739a5264d885cce5a01c9df60a65261a1986255620eaf787692f336ad1",
+    "package": "org.d2rmobile.diagnostics"
+  },
+  "device": {
+    "manufacturer": "samsung",
+    "model": "SM-S9280",
+    "apiLevel": 36,
+    "supportedAbis": [
+      "arm64-v8a"
+    ]
+  }
+}

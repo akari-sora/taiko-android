@@ -1,0 +1,7 @@
+Starting: Intent { cmp=org.d2rmobile.diagnostics/.MainActivity }
+Status: ok
+LaunchState: COLD
+Activity: org.d2rmobile.diagnostics/.MainActivity
+TotalTime: 770
+WaitTime: 776
+Complete

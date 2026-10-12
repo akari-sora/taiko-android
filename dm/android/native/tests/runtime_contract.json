@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "requiredCheckIds": ["abi", "wx", "tls", "x18", "hle", "signal", "thread", "vulkan"],
+  "allowedStatuses": ["PASS", "FAIL", "SKIP"],
+  "expectedSyntheticResults": {
+    "executableMemoryReturn": 42,
+    "hostGateReturn": 42,
+    "threadReturn": 42,
+    "elfHleEntries": 1
+  },
+  "invariants": [
+    "Never allocate or protect a page writable and executable simultaneously",
+    "Never write TPIDR_EL0 or x18",
+    "Restore every signal handler and alternate signal stack",
+    "Join each successfully created pthread",
+    "Destroy every successfully created Vulkan device and instance",
+    "G1 through G6 remain NOT_RUN; synthetic probes do not validate the original guest loader",
+    "gamePlayable is always false"
+  ]
+}
