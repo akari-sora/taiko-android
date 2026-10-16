@@ -51,6 +51,7 @@ add_library(d2r_diagnostics SHARED diagnostics.cpp
   ../../platform/android/guest_bootstrap.cpp
   ../../platform/android/host_bridge.cpp
   ../../platform/android/kernel_runtime.cpp
+  ../../platform/android/diag_abort_runtime.cpp
   ../../platform/android/kernel_probes.cpp
   ../../platform/android/service_probes.cpp
   ../../platform/android/kernel_memory_android.c

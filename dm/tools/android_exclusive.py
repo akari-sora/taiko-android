@@ -33,7 +33,11 @@ class Region:
     exit_edges: frozenset
     scratch: int
     state: int
-
+    # Source-exact attempts may leave without using their reservation again.
+    # Retire these live exits before even the first host-state/frame access.
+    retire_exit_targets: frozenset = frozenset()
+    requires_diag_abort_v1: bool = False
+    monitor_retiring_call_sites: frozenset = frozenset()
 
 def successors(ins):
     if ins.mnemonic == 'b':
@@ -1256,7 +1260,228 @@ def require_native_wait_transfers(instructions, by_pc, kinds, entries, protected
             raise api.RewriteError(f'0x{ins.address:x}: native wait transfer bypasses its TLR producer')
 
 
-def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfers=None):
+def native_read_wait_checked_return(start, by_pc, kinds, api):
+    """Keep a read-only LDAXR/WFE poll native through its checked return.
+
+    WFE must execute while the address monitor is live on retry. The sole
+    host-backed SP check is after the successful poll, with no later WFE or
+    store-exclusive before RET. Its normal checked-stack gate remains in
+    place; the poll words remain native and no case is silently promoted to
+    a new entry.
+    """
+    begin=start.address-8
+    body=tuple(by_pc.get(begin+offset) for offset in range(0,32,4))
+    tail=tuple(by_pc.get(begin+offset) for offset in range(32,48,4))
+    if any(ins is None for ins in body+tail):
+        return None
+    values=tuple(struct.unpack('<I',ins.bytes)[0] for ins in body+tail)
+    epilogues={
+        (0xA9427BFD,0xA9414FF4,0xF84307F5,0xD65F03C0):8,
+        (0xA9424FF4,0xF9400BF5,0xA8C37BFD,0xD65F03C0):16,
+    }
+    if (values[:8]!=(0xD50320BF,0xD503205F,0x885FFE69,0x72003D3F,
+                     0x54FFFFA1,0x53107D29,0x6B29011F,0x54FFFF41) or
+            values[8:] not in epilogues):
+        return None
+    if any(kinds.get(ins.address,'missing') is not None for ins in body+tail[:2]):
+        raise api.RewriteError(f'0x{begin:x}: source rewrite in native read wait')
+    if kinds.get(tail[2].address)!='stack_check' or kinds.get(tail[3].address) is not None:
+        raise api.RewriteError(f'0x{begin:x}: read wait return lacks checked SP gate')
+    operation=api.stack_check_operation(values[-2])
+    if operation!={'source':31,'delta':48,'access_bytes':epilogues[values[8:]],'post_index':True}:
+        raise api.RewriteError(f'0x{begin:x}: read wait return has different SP access')
+    validate_memory_operands(body[2],api)
+    validate_exclusive(body[2],api)
+    for ins in tail[:3]:
+        validate_memory_operands(ins,api)
+    # SEVL precedes the first wait; the two mismatch edges go to that WFE,
+    # not to a host call or a second producer. The success edge reaches the
+    # checked epilogue, where the reservation is no longer consumed.
+    return {ins.address for ins in body},body[0].address
+
+
+
+def ticket_continuation_retires(first, by_pc, kinds, api, *,
+                               monitor_retiring_calls=frozenset(), used_contracts=None):
+    """Bound every selected continuation until its old token is retired.
+
+    A selected BL alone is not proof: the callee could consume the caller's
+    token. The exact SVC36/RET boundary and importer-verified forced-binding
+    callsites are the only call boundaries. Ordinary interposable PLTs, returns,
+    unknown control flow and token-using stores remain refusals.
+    """
+    colors={}
+    verified_used=set()
+    pending=[(first,False)]
+    while pending:
+        pc,leaving=pending.pop()
+        if leaving:
+            colors[pc]=2;continue
+        if colors.get(pc)==1:return False
+        if colors.get(pc)==2:continue
+        ins=by_pc.get(pc)
+        if ins is None or len(colors)>=MAX_TAIL_WORDS:return False
+        if ins.mnemonic in api.EXCLUSIVE_LOADS:
+            if kinds.get(pc,'missing') is not None:return False
+            validate_exclusive(ins,api);validate_memory_operands(ins,api)
+            colors[pc]=2;continue
+        if ins.mnemonic=='clrex':
+            if kinds.get(pc,'missing') is not None:return False
+            colors[pc]=2;continue
+        if ins.mnemonic in api.EXCLUSIVE_STORES:return False
+        if ins.mnemonic=='bl':
+            if kinds.get(pc,'missing') is not None:return False
+            if pc in monitor_retiring_calls:
+                # The importer supplies immutable callsites bound to exact
+                # PLT/GOT/ABI metadata. The native flagged-module binder must
+                # enforce the same canonical CLREX-first abort contract.
+                verified_used.add(pc);colors[pc]=2;continue
+            target=ins.operands[-1].imm
+            stub,ret=by_pc.get(target),by_pc.get(target+4)
+            if (stub is None or ret is None or
+                    struct.unpack('<I',stub.bytes)[0]!=0xD40006C1 or
+                    struct.unpack('<I',ret.bytes)[0]!=0xD65F03C0 or
+                    kinds.get(target,'missing')!=api.site_kind(stub) or
+                    kinds.get(target+4,'missing') is not None):return False
+            colors[pc]=2;continue
+        if (kinds.get(pc,'missing') is not None or api.is_fatal_instruction(ins) or
+                any(ins.group(group) for group in (CS_GRP_CALL,CS_GRP_RET)) or
+                (ins.group(CS_GRP_JUMP) and ins.mnemonic!='b' and
+                 ins.mnemonic not in CONDITIONAL and not ins.mnemonic.startswith('b.'))):return False
+        targets=successors(ins)
+        if not targets:return False
+        colors[pc]=1;pending.append((pc,True))
+        pending.extend((target,False) for target in reversed(targets))
+    if used_contracts is not None:used_contracts.update(verified_used)
+    return True
+
+
+
+def retiring_ticket_attempt(start, by_pc, kinds, api, *, monitor_retiring_calls=frozenset()):
+    """Relocate only the observed acquire/release ticket-count attempts.
+
+    Live branches leave the attempt and cannot use its token before retirement.
+    The six-word release keeps failed-store retries inside its one frame.
+    Explicit CLREX makes later WFE/SVC/abort paths closed without
+    guessing that an interposable abort cannot return. WFE wake timing may
+    differ: execution retains the platform's mandatory EVTSTRM prerequisite.
+    No source call, SP operation, or unrelated native topology is admitted.
+    """
+    begin=start.address
+    release=start.mnemonic=='ldxr'
+    size=24 if release else 32
+    block=tuple(by_pc.get(begin+offset) for offset in range(0,size,4))
+    if any(ins is None for ins in block):return None
+    values=tuple(struct.unpack('<I',ins.bytes)[0] for ins in block)
+    loaded,base=values[0]&31,values[0]>>5&31
+    temp=(values[4]>>16&31) if release else (values[1]&31)
+    if release:
+        expected=(0x885F7C00|base<<5|loaded,0xF2403C1F|loaded<<5,values[2],
+                  0x51000400|loaded<<5|loaded,
+                  0x8800FC00|temp<<16|base<<5|loaded,0x35FFFF60|temp)
+        if values!=expected or values[2]&0xFF00001F!=0x54000000:return None
+    else:
+        expected=(0x885FFC00|base<<5|loaded,0x53105C00|loaded<<5|temp,
+                  0x6B40601F|loaded<<16|temp<<5,values[3],
+                  0x11000400|loaded<<5|loaded,0x72003C1F|loaded<<5,
+                  values[6],0x88007C00|temp<<16|base<<5|loaded)
+        if (values!=expected or values[3]&0xFF00001F!=0x54000001 or
+                values[6]&0xFF00001F!=0x54000000):return None
+    roles=(base,loaded,temp)
+    if len(set(roles))!=3 or any(role in {18,29,30,31} for role in roles):return None
+    closed=begin+size
+    if release:
+        fatal=block[2].operands[-1].imm
+        live_targets=(fatal,)
+        exits=frozenset(((begin+8,fatal),(begin+20,closed)))
+        retries=frozenset(((begin+20,begin),))
+        terminal=begin+16
+        if not closed<fatal:return None
+    else:
+        mismatch,fatal=(block[index].operands[-1].imm for index in (3,6))
+        live_targets=(mismatch,fatal)
+        exits=frozenset(((begin+12,mismatch),(begin+24,fatal),(begin+28,closed)))
+        retries=frozenset();terminal=begin+28
+        if not mismatch<begin<closed<fatal:return None
+    if any(target not in by_pc or api.is_fatal_instruction(by_pc[target])
+           for target in (*live_targets,closed)):return None
+    used_contracts=set()
+    if not all(ticket_continuation_retires(target,by_pc,kinds,api,
+                                         monitor_retiring_calls=monitor_retiring_calls,
+                                         used_contracts=used_contracts)
+               for target in live_targets):return None
+    nodes={ins.address for ins in block}
+    if any(kinds.get(pc,'missing') is not None for pc in nodes):
+        raise api.RewriteError(f'0x{begin:x}: source rewrite in retiring ticket attempt')
+    for ins in block:
+        validate_memory_operands(ins,api)
+        if ins.mnemonic in api.EXCLUSIVE_LOADS|api.EXCLUSIVE_STORES:validate_exclusive(ins,api)
+    used=set().union(*(api.registers(ins) for ins in block))
+    available=[reg for reg in range(16) if reg not in used]
+    if len(available)<2:return None
+    return Region(begin,block,frozenset((terminal,)),retries,exits,
+                  *available[:2],frozenset(live_targets),
+                  requires_diag_abort_v1=bool(used_contracts),
+                  monitor_retiring_call_sites=frozenset(used_contracts))
+
+
+
+def writer_ticket_attempt(start, by_pc, kinds, api, *, monitor_retiring_calls=frozenset()):
+    """One exact writer acquire: a failed STXR exits before any retry work.
+
+    The fatal comparison alone leaves a live reservation. The successful and
+    failed store paths already close it in hardware; their original downstream
+    counter/SVC/WFE code remains native and outside this relocated attempt.
+    """
+    if start.mnemonic!='ldaxr':return None
+    begin=start.address
+    block=tuple(by_pc.get(begin+offset) for offset in range(0,36,4))
+    if any(ins is None for ins in block):return None
+    values=tuple(struct.unpack('<I',ins.bytes)[0] for ins in block)
+    loaded,base=values[0]&31,values[0]>>5&31
+    temp,status,increment=values[1]&31,values[7]>>16&31,values[6]>>16&31
+    roles=(loaded,base,temp,status,increment)
+    if len(set(roles))!=5 or any(role in {18,29,30,31} for role in roles):return None
+    fatal=block[5].operands[-1].imm if block[5].mnemonic=='b.eq' else None
+    success=block[8].operands[-1].imm if block[8].mnemonic=='cbz' else None
+    closed=begin+36
+    if (fatal is None or success is None or not closed<success<fatal or
+            any(target not in by_pc or api.is_fatal_instruction(by_pc[target])
+                for target in (closed,success,fatal))):return None
+    expected=(0x885FFC00|base<<5|loaded,
+              0xD3587C00|loaded<<5|temp,
+              0x4B404000|loaded<<16|temp<<5|temp,
+              0x2A2003E0|temp<<16|temp,
+              0x72001C1F|temp<<5,
+              0x54000000|(((fatal-(begin+20))//4)&0x7FFFF)<<5,
+              0x0B000000|increment<<16|loaded<<5|temp,
+              0x88007C00|status<<16|base<<5|temp,
+              0x34000000|(((success-(begin+32))//4)&0x7FFFF)<<5|status)
+    if values!=expected:return None
+    used_contracts=set()
+    if not ticket_continuation_retires(fatal,by_pc,kinds,api,
+                                      monitor_retiring_calls=monitor_retiring_calls,
+                                      used_contracts=used_contracts):return None
+    if any(kinds.get(ins.address,'missing') is not None for ins in block):
+        raise api.RewriteError(f'0x{begin:x}: source rewrite in writer ticket attempt')
+    for ins in block:
+        validate_memory_operands(ins,api)
+        if ins.mnemonic in api.EXCLUSIVE_LOADS|api.EXCLUSIVE_STORES:validate_exclusive(ins,api)
+    used=set().union(*(api.registers(ins) for ins in block))
+    available=[reg for reg in range(16) if reg not in used]
+    if len(available)<2:return None
+    return Region(begin,block,frozenset((begin+28,)),frozenset(),
+                  frozenset(((begin+20,fatal),(begin+32,success),(begin+32,closed))),
+                  *available[:2],frozenset((fatal,)),
+                  requires_diag_abort_v1=bool(used_contracts),
+                  monitor_retiring_call_sites=frozenset(used_contracts))
+
+
+
+def plan_regions(instructions, kinds, entry_offsets, api, *, monitor_retiring_calls=frozenset(), native_wait_transfers=None):
+    if (not isinstance(monitor_retiring_calls,frozenset) or
+            any(type(pc) is not int or pc<0 or pc%4 for pc in monitor_retiring_calls)):
+        raise api.RewriteError('monitor-retiring call proof must be immutable aligned offsets')
     by_pc = {ins.address: ins for ins in instructions}
     direct_incoming, entry_index_attempted = None, False
 
@@ -1315,6 +1540,18 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfe
     regions, occupied, consumed = [], set(), set()
     for start in instructions:
         if start.mnemonic not in api.EXCLUSIVE_LOADS or start.address in consumed:
+            continue
+        ticket=(retiring_ticket_attempt(start,by_pc,kinds,api,
+                                        monitor_retiring_calls=monitor_retiring_calls) or
+                writer_ticket_attempt(start,by_pc,kinds,api,
+                                      monitor_retiring_calls=monitor_retiring_calls))
+        if ticket is not None:
+            nodes={ins.address for ins in ticket.instructions}
+            if occupied&nodes:
+                raise api.RewriteError(f'0x{ticket.entry:x}: overlapping exclusive windows')
+            require_acyclic(nodes,by_pc,ticket.retry_edges,ticket.exit_edges,api)
+            require_single_entry(nodes,ticket.entry,instructions,entry_offsets,api)
+            occupied.update(nodes);consumed.add(start.address);regions.append(ticket)
             continue
         native_wait=native_wait_mutex(start,by_pc,kinds,api)
         if native_wait is not None:
@@ -1380,6 +1617,14 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfe
                 raise api.RewriteError(f'0x{entry:x}: overlapping exclusive windows')
             check_single_entry(nodes,entry)
             occupied.update(nodes);consumed.update(heads)
+            continue
+        read_wait=native_read_wait_checked_return(start,by_pc,kinds,api)
+        if read_wait is not None:
+            nodes,entry=read_wait
+            if occupied&nodes:
+                raise api.RewriteError(f'0x{entry:x}: overlapping exclusive windows')
+            require_single_entry(nodes,entry,instructions,entry_offsets,api)
+            occupied.update(nodes);consumed.add(start.address)
             continue
         if native_dual_load_lock(start, by_pc, kinds, api):
             nodes = set(range(start.address, start.address + 28, 4))
@@ -1546,11 +1791,16 @@ def emit_region(emitter, region, api):
     # even when sorted source addresses contain holes or terminal epilogues.
     mapped = {ins.address: emitter.pc + 4 + index * 8 for index, ins in enumerate(region.instructions)}
     # A backwards edge can make a terminal's original address lower than the
-    # exclusive load. Sorted layout must still enter at that load, not CLREX.
+    # exclusive load. Sorted layout must still enter at the approved entry.
     emitter.emit(api.branch(emitter.pc, mapped[region.entry]))
     exits = sorted({target for _, target in region.exit_edges})
     exit_start = emitter.pc + len(region.instructions) * 8
-    exit_stubs = {target: exit_start + index * 16 for index, target in enumerate(exits)}
+    if not region.retire_exit_targets<=set(exits):
+        raise api.RewriteError('retirement target outside exclusive exits')
+    exit_stubs,cursor={},exit_start
+    for target in exits:
+        exit_stubs[target]=cursor
+        cursor+=16+(4 if target in region.retire_exit_targets else 0)
     for ins in region.instructions:
         destinations = {target: exit_stubs[target] if (ins.address, target) in region.exit_edges else mapped[target]
                         for target in successors(ins)}
@@ -1560,6 +1810,8 @@ def emit_region(emitter, region, api):
         else:
             emitter.emit(api.branch(emitter.pc, destinations[ins.address + 4]))
     for target in exits:
+        if target in region.retire_exit_targets:
+            emitter.emit(0xD5033F5F)  # Retire before any scratch/state/frame access.
         emitter.emit(api.memory(False, scratch, state, 0))
         emitter.emit(api.pair(True, scratch, state, 16))
         emitter.emit(0x910083FF)  # add sp,sp,#32; original x16/LR may have changed

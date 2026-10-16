@@ -16,6 +16,7 @@ import struct
 import tempfile
 
 from android_rewrite import decode, indirect_register, stack_check_operation
+from android_diag_abort import MODULE_REQUIRE_DIAG_ABORT_V1, abi_header_sha256, validate_publication_contract
 from nso_format import parse_nso, parse_metadata
 from taiko_call_contract import select_checked_calls
 from taiko_forest_audit import verify_checked_call_forests
@@ -123,7 +124,18 @@ def verify_package(path, report, source, nso, metadata):
     require(path.stat().st_size <= MAX_PACKAGE, 'capsule exceeds bounded size')
     data = path.read_bytes(); name = source['name']
     require(len(data) >= 384 and data[:8] == b'DMAMOD02' and
-        struct.unpack_from('<IIII', data, 8) == (2, ABI, 384, 1), 'capsule must be checked-stack DMAMOD02')
+        struct.unpack_from('<III', data, 8) == (2, ABI, 384), 'capsule must be checked-stack DMAMOD02')
+    required_flags=struct.unpack_from('<I',data,20)[0]
+    if required_flags not in (1,1|MODULE_REQUIRE_DIAG_ABORT_V1):
+        raise ValueError('original capsule has unknown or inconsistent required ABI flags')
+    receipt=report.get('rewrite',{})
+    if not isinstance(receipt,dict):
+        raise ValueError('original capsule rewrite attestation must be an object')
+    declared=receipt.get('requires_diag_abort_v1',False)
+    if type(declared) is not bool or declared!=bool(required_flags&MODULE_REQUIRE_DIAG_ABORT_V1):
+        raise ValueError('original capsule required ABI flags disagree with rewrite attestation')
+    if not declared and any(key in receipt for key in ('required_diag_abort_abi','diag_abort_call_sites','diag_abort_plt_branches')):
+        raise ValueError('unflagged original capsule carries a required DiagAbort receipt')
     require(data[168:184] == name.encode('ascii').ljust(16, b'\0') and
         data[184:216].hex() == source['build_id'] and data[216:248].hex() == source['source_sha256'],
         'capsule original source/build mismatch')
@@ -214,6 +226,7 @@ def verify_package(path, report, source, nso, metadata):
         gates.append(dict(return_offset=return_offset, kind=kind, argument=argument))
         provenance.append(dict(return_offset=return_offset, original_offset=original_offset, original_word=original_word, flags=flags))
     require(gates == rewrite.get('gates') and provenance == rewrite.get('gate_provenance'), 'gate receipt/table mismatch')
+    validate_publication_contract(nso,metadata,data,receipt)
     roots = sorted({symbol.value for symbol in metadata.symbols if symbol.kind == 2 and symbol.section not in (0, 0xfff1)})
     discovery = report.get('code_discovery', {})
     code_roots = discovery.get('roots') if isinstance(discovery, dict) else None
@@ -372,7 +385,8 @@ def generate(source, capsules, content, output, audit_output):
         rtld=facts['rtld'], sources=[facts[name] for name in MODULE_ORDER], import_inventory=inventory,
         recipe_sha256={name: sha((ROOT / 'dm/tools' / name).read_bytes()) for name in
             ('gen_taiko_pins.py', 'taiko_content.py', 'taiko_call_contract.py', 'taiko_sdk_contract.py', 'taiko_forest_audit.py',
-             'nso_eh.py', 'nso_format.py', 'android_import.py', 'android_rewrite.py', 'android_exclusive.py', 'android_instruction.py')})
+             'nso_eh.py', 'nso_format.py', 'android_import.py', 'android_rewrite.py', 'android_exclusive.py', 'android_instruction.py', 'android_diag_abort.py')},
+        diag_abort_abi_header_sha256=abi_header_sha256())
     model = dict(schema=1, build=BUILD, program_id=PROGRAM_ID, rtld=facts['rtld'], sources=audit['sources'],
         modules=modules, source_audit=audit, source_audit_sha256=sha(canonical(audit)), import_manifest_sha256=sha(raw))
     model['content'] = verify_content(content, modules, model['import_manifest_sha256'])

@@ -147,3 +147,38 @@ NOT_RUN, first originalframe NOT_OBSERVED, compiledprovider absent.
 Own034b SVC36 retirement synthetic probe passed bothS8/S24 and both devices
 were explicitly released. ExternalEden1.1.1 full song/results/save/freshPID
 readback remains complete; video has no audio, AVsync/latency not assessed.
+
+
+## Verified source before Cursor handoff
+
+Human requested closure and pause; no further features, research or repair
+batches. Shared039 runtime/requiredflag/sourcePLT chain, precise040 readwait
+epilogue and independently reviewed052 canonical source-obligation fix are
+received. Rejected048/ff57 cannot authorize publication. ROOT690 available
+Android tests PASS86.879s (18 inherited missing fixtures excluded); Taiko102
+ran98PASS/4existinghostcompilerSKIP6.514s; publication12PASS after normal test
+path adaptation and removing one unused test import. Assertions unchanged.
+
+Fresh own050 App/test/lint PASS20.297s,1456source bytes stable during build;
+ELF61f29c5ff690d910c7ac299efe8d058be9ae0e17f61a3e66bf6d15b6fb6faf67
+strict244RELATIVE/symidx0 registrations, zeroABS64, exact old243 names plus
+one private canonical DiagAbort entry. HiddenCLREX-first16Bentry directly
+branches to hiddenhandler; old2typedentries/26TLSdescriptors/14closurecalls
+and76B034bhelper/capsulechecks PASS. No050 device install/physical test.
+Only test-path/lint changes and handoff docs followed that build; compiled
+native sources remain byte-identical to accepted build manifest.
+
+Latest complete main014/frozen027 CLOSED ORIGINAL_FAILURE28c134 nested
+exclusive window; inputs/output/function unchanged=true. SDK022/frozen026
+CLOSED373b5c; subsdk0-022 PREPARED same7478...76ab. No full import running.
+New053 sparse pop candidate sealed under.local/main-nested-053: private only,
+14author tests/78CPU runs,56selected+9UNKNOWN; independent review, composition
+and fullmain proof remain pending. Do not apply it as an approved patch.
+
+Current039/040/052 source still needs coherent3module full preflights and
+Taiko resource/provider generation. Provider absent; SDK/nnMain NOT_RUN,
+first originalframe NOT_OBSERVED. All agents relinquished source ownership.
+Both phone leases previously released; Fold7 reserved for human daily use.
+Existing foldableAVD D2R_Taiko_Fold_API36 is x86_64/UI-only for this arm64 APK,
+not an original ARM runtime result. Do not reset or take another line's AVD.
+See HANDOFF_TO_CURSOR.md for commands, source/artifact pins and pending work.

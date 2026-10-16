@@ -15,6 +15,7 @@ import struct
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, CS_GRP_JUMP, CS_GRP_CALL, CS_GRP_RET
 from capstone.arm64_const import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG, ARM64_REG_X0
+from android_diag_abort import MODULE_REQUIRE_DIAG_ABORT_V1
 from android_rewrite import (ABI, INDIRECT_HOST, FatalWord, RewriteError, rewrite, site_kind,
                              indirect_register, is_fatal_word, is_fatal_instruction, stack_check_operation, has18,
                              byte_jump_table,halfword_jump_table,readonly_guest_table,x18_jump_table,native_transfer_plan)
@@ -872,7 +873,13 @@ def make_package(name, nso, metadata, image, patch_offset, package_version=1):
     header_size = HEADER_SIZE if package_version == 1 else 384
     header = bytearray(header_size)
     header[:8] = MAGIC if package_version == 1 else b'DMAMOD02'
-    struct.pack_into('<IIII', header, 8, package_version, ABI, header_size, 1 if image.checked_stack else 0)
+    if image.requires_diag_abort_v1 or image.diag_abort_call_sites or image.diag_abort_plt_branches:
+        image.validate()
+    if image.requires_diag_abort_v1:
+        if package_version!=2:
+            raise ImportError('required DiagAbort ABI cannot be encoded in a legacy capsule')
+    required_flags=(1 if image.checked_stack else 0)|(MODULE_REQUIRE_DIAG_ABORT_V1 if image.requires_diag_abort_v1 else 0)
+    struct.pack_into('<IIII', header, 8, package_version, ABI, header_size, required_flags)
     section_values = tuple(value for section in nso.sections for value in (section.offset, section.size))
     struct.pack_into('<11Q', header, 24, len(image.bytes), len(nso.image), *section_values,
                      nso.bss_size, patch_offset, len(image.bytes) - patch_offset)
@@ -967,6 +974,7 @@ def import_module(source, name, *, package_version=1, profile=None, indirect_pol
                     code_ranges=code_ranges, patch_offset=patch_offset,
                     entry_offsets=code_report['roots'], profile=selected_profile,
                     independent_entry_offsets=code_report['independent_roots'],
+                    diag_abort_source=bytes(source) if package_version==2 and checked_stack else None,
                     indirect_policy=indirect_policy, package_version=package_version,
                     guarded_indirect_offsets=code_report.get('guarded_indirect_sites', ()), checked_stack=checked_stack,
                     readonly_ranges=((nso.sections[1].offset,nso.sections[1].end),),

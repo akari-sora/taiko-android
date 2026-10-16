@@ -17,6 +17,7 @@ import struct
 import sys
 
 import android_exclusive
+import android_diag_abort
 import android_observation
 from android_instruction import Instruction
 
@@ -127,6 +128,9 @@ class Image:
     indirect_policy: str = 'strict'
     package_version: int = 1
     checked_stack: bool = False
+    requires_diag_abort_v1: bool = False
+    diag_abort_call_sites: tuple = ()
+    diag_abort_plt_branches: tuple = ()
     checked_calls: tuple = ()
     checked_call_forests: tuple = ()
     native_transfer_proofs: tuple = ()
@@ -153,12 +157,25 @@ class Image:
             result['checked_call_forests'] = [dict(item) for item in self.checked_call_forests]
         if self.native_transfer_proofs:
             result['native_transfer_proofs'] = [dict(item) for item in self.native_transfer_proofs]
+        if self.requires_diag_abort_v1:
+            result.update(requires_diag_abort_v1=True,required_diag_abort_abi=android_diag_abort.DIAG_ABORT_RESOLVER_V1,
+                          diag_abort_call_sites=list(self.diag_abort_call_sites),
+                          diag_abort_plt_branches=list(self.diag_abort_plt_branches))
         return result
 
     def validate(self):
         size = len(self.bytes)
         if not isinstance(self.checked_stack, bool) or (self.checked_stack and self.package_version != 2):
             raise RewriteError('checked stack requires explicit boolean and package version 2')
+        if (type(self.requires_diag_abort_v1) is not bool or
+                self.requires_diag_abort_v1 and (not self.checked_stack or self.package_version!=2 or self.indirect_policy!='guarded-host') or
+                any(type(items) is not tuple or
+                    any(type(pc) is not int or pc%4 or not 0<=pc<=size-4 for pc in items) or
+                    tuple(sorted(set(items)))!=items
+                    for items in (self.diag_abort_call_sites,self.diag_abort_plt_branches)) or
+                self.requires_diag_abort_v1!=bool(self.diag_abort_call_sites) or
+                self.requires_diag_abort_v1!=bool(self.diag_abort_plt_branches)):
+            raise RewriteError('required DiagAbort ABI needs checked v2 and exact consumed source/gate evidence')
         if self.target != 'android-arm64' or self.abi != ABI:
             raise RewriteError('unsupported target/ABI')
         if size == 0 or size % 4 or self.entry_offset % 4 or not 0 <= self.entry_offset <= size - 4:
@@ -193,6 +210,15 @@ class Image:
             returns.add(gate.return_offset)
         if (self.profile is not None or any(g.kind in (INDIRECT_HOST, STACK_CHECK) for g in self.gates)) and len(self.gates) != len(self.gate_provenance):
             raise RewriteError('gate provenance count mismatch')
+        for pc in self.diag_abort_plt_branches:
+            gates=[gate for gate,origin in zip(self.gates,self.gate_provenance) if
+                   origin.original_offset==pc and origin.original_word==0xD61F0220 and origin.flags==0 and
+                   gate.kind==INDIRECT_HOST and gate.argument==17]
+            sites=[site for site in self.sites if site.offset==pc]
+            if (len(gates)!=1 or len(sites)!=1 or sites[0].instruction!='br x17' or
+                    not 0<=sites[0].trampoline<=gates[0].return_offset-4 or
+                    self.bytes[pc:pc+4]!=word(branch(pc,sites[0].trampoline))):
+                raise RewriteError('required DiagAbort PLT lacks its exact canonical indirect gate and rewrite site')
         return self
 
 
@@ -3612,7 +3638,7 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
             indirect_policy='strict', package_version=1, guarded_indirect_offsets=(), checked_stack=False,
             readonly_ranges=(), proven_guest_indirect_offsets=(), checked_call_targets=None, protected_ranges=(),
             checked_call_forest_offsets=(), checked_call_forest_targets=(), independent_entry_offsets=None,
-            native_transfer_candidates=None):
+            native_transfer_candidates=None, diag_abort_source=None):
     """Rewrite selected ARM64 code while preserving all other raw image bytes.
 
     Ranges are image-relative, half-open (start, end) pairs within text_size.
@@ -3708,6 +3734,11 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
             decoded=decode(struct.unpack_from('<I',raw,pc)[0],pc)
             instructions.append(decoded if isinstance(decoded,FatalWord) else Instruction(decoded))
     by_pc = {ins.address: ins for ins in instructions}
+    try:
+        diag_proof=(android_diag_abort.verify_diag_abort_source(diag_abort_source,raw,by_pc)
+                    if diag_abort_source is not None else android_diag_abort.DiagAbortProof())
+    except (ValueError,OSError) as error:
+        raise RewriteError(str(error)) from error
     kinds = {ins.address: site_kind(ins) for ins in instructions}
     if checked_stack:
         for ins in instructions:
@@ -3819,6 +3850,27 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
     for parameter in parameters.values():
         kinds[parameter.a] = 'parameter'
         kinds[parameter.b] = 'parameter_tail'
+    # A native wait audits every possible indirect predecessor before the
+    # exclusive planner returns. If another selected attempt actually consumes
+    # the verified fatal import, its PLT must already be classified as the
+    # exact guarded host transfer. This preliminary match grants no region:
+    # the complete planner still checks entries, overlaps and all exits below.
+    verified_abort_calls=frozenset(pc for pc,_ in diag_proof.calls)
+    if verified_abort_calls and any(
+            ins.mnemonic in EXCLUSIVE_LOADS and
+            (candidate:=(android_exclusive.retiring_ticket_attempt(
+                ins,by_pc,kinds,sys.modules[__name__],
+                monitor_retiring_calls=verified_abort_calls) or
+                android_exclusive.writer_ticket_attempt(
+                    ins,by_pc,kinds,sys.modules[__name__],
+                    monitor_retiring_calls=verified_abort_calls))) is not None and
+            candidate.requires_diag_abort_v1 for ins in instructions):
+        if diag_proof.coverage_error or package_version!=2 or not checked_stack or indirect_policy!='guarded-host':
+            raise RewriteError(diag_proof.coverage_error or 'required DiagAbort ABI lacks checked guarded-host v2')
+        for pc in diag_proof.plt_branches:
+            if pc not in by_pc or kinds.get(pc) not in (None,'gate'):
+                raise RewriteError('required DiagAbort PLT overlaps an incompatible source rewrite')
+            guarded.add(pc);kinds[pc]='gate'
     # Native wait is an explicit opt-in. Unknown raw transfers cannot prove
     # that its ordinary TLS producer executes. Supply only already validated
     # lowering facts, including the entire finite guest case-entry set.
@@ -3848,7 +3900,23 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
         if native_transfer_plan(by_pc[pc],by_pc,final_transfer_entries,raw,kinds,protected_ranges) != plan:
             raise RewriteError(f'0x{pc:x}: native transfer source invalidated by final transfer entries')
     regions = android_exclusive.plan_regions(instructions, kinds, roots, sys.modules[__name__],
-                                            native_wait_transfers=native_wait_transfers)
+                                            monitor_retiring_calls=frozenset(pc for pc,_ in diag_proof.calls),
+                                             native_wait_transfers=native_wait_transfers)
+    required_regions=[region for region in regions if region.requires_diag_abort_v1]
+    used_abort_calls=frozenset(pc for region in required_regions for pc in region.monitor_retiring_call_sites)
+    verified_abort_calls=dict(diag_proof.calls)
+    if required_regions and (not used_abort_calls or not used_abort_calls<=verified_abort_calls.keys()):
+        raise RewriteError('required DiagAbort region lacks independently verified consumed call sites')
+    requires_diag_abort_v1=bool(required_regions)
+    if requires_diag_abort_v1:
+        if diag_proof.coverage_error:
+            raise RewriteError(diag_proof.coverage_error)
+        if package_version!=2 or not checked_stack or indirect_policy!='guarded-host':
+            raise RewriteError('required DiagAbort ABI requires checked-stack v2 guarded-host policy')
+        # A writable GOT cannot retarget a consumed abort to an ordinary HLE.
+        # Every selected matching PLT is gated for native canonical enforcement.
+        for pc in diag_proof.plt_branches:
+            guarded.add(pc);kinds[pc]='gate'
     region_entries = {region.entry: region for region in regions}
     region_words = {ins.address for region in regions for ins in region.instructions}
     if any(region_words & set(range(p.get('proof_start_offset',p.get('zero_extend_offset')),p['offset']+4,4)) for p in table_loads.values()):
@@ -3901,6 +3969,9 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
                  profile=profile, gate_provenance=tuple(emitter.gate_provenance),
                  parameters=tuple(profile.parameters) if profile is not None else (),
                  indirect_policy=indirect_policy, package_version=package_version, checked_stack=checked_stack,
+                 requires_diag_abort_v1=requires_diag_abort_v1,
+                 diag_abort_call_sites=tuple(sorted(used_abort_calls)),
+                 diag_abort_plt_branches=tuple(sorted(diag_proof.plt_branches)) if requires_diag_abort_v1 else (),
                  checked_calls=tuple(sorted(checked_calls.items())),
                  checked_call_forests=(forest,) if forest is not None else (),
                  native_transfer_proofs=tuple(transfer_proofs.values())).validate()

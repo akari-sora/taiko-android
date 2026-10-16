@@ -1,6 +1,7 @@
 #pragma once
 #include "guest_thread.h"
 #include "host_bridge.hpp"
+#include "diag_abort_abi.h"
 #include <atomic>
 #include <pthread.h>
 #include <mutex>
@@ -64,6 +65,7 @@ public:
     // GuestStack::call and no lifecycle mutex spans the actual callback.
     bool graphics_guest_callback(uint64_t target, uint64_t command, uint64_t requested, uint64_t data);
     bool keyboard_entry_origin(uintptr_t target,uint64_t guest_lr,uintptr_t guest_sp,GuestHleOrigin*);
+    bool diag_abort_origin(uint64_t guest_lr,uintptr_t guest_sp,DiagAbortCaller*);
 private:
     friend class RuntimeReadLease;
     friend class RuntimeGpuLease;
@@ -84,6 +86,7 @@ private:
     size_t active_gpu_ = 0;
     bool closing_ = false;
     bool needs_parameters_ = false;
+    bool needs_diag_abort_ = false;
     uint64_t parameter_seed_[4]{};
     uint64_t oe_epoch_ = 0;
     uint64_t vi_generation_ = 0;

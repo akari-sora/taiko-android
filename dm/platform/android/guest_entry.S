@@ -350,6 +350,19 @@ dm_android_character_isalpha_entry:
     mov x2, sp
     b dm_android_character_isalpha_from_guest
 .size dm_android_character_isalpha_entry, .-dm_android_character_isalpha_entry
+// Original required-contract AbortImpl: abandon any exclusive reservation
+// before touching memory or the stack, then capture the genuine caller ABI.
+.p2align 2
+.global dm_android_diag_abort_entry
+.hidden dm_android_diag_abort_entry
+.hidden dm_android_diag_abort_from_guest
+.type dm_android_diag_abort_entry, %function
+dm_android_diag_abort_entry:
+    clrex
+    mov x4, x30
+    mov x5, sp
+    b dm_android_diag_abort_from_guest
+.size dm_android_diag_abort_entry, .-dm_android_diag_abort_entry
 .section .note.GNU-stack,"",%progbits
 
 // Diagnostics only. The caller supplies an exact symbol from its verified,

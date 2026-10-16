@@ -16,6 +16,7 @@ import struct
 
 from android_profiles import APPLE_BUILD_PREFIX, APPLE_OBS, APPLE_PARAMS
 from nso_format import parse_nso, parse_metadata
+from android_diag_abort import (MODULE_REQUIRE_DIAG_ABORT_V1, abi_header_sha256, validate_publication_contract)
 
 ROOT = Path(__file__).resolve().parents[2]
 PROVIDER_OUTPUT = ROOT/'dm/platform/android/original_build_pins.cpp'
@@ -77,7 +78,8 @@ def verify_sources(directory):
     audit = dict(schema=1, build=BUILD, sources=result, original_word_checks=checks,
                  recipe_sha256={name: sha((ROOT/'dm/tools'/name).read_bytes())
                                 for name in ('gen_android_original_pins.py', 'nso_format.py', 'android_profiles.py', 'patch_nso.py',
-                                             'android_import.py', 'android_rewrite.py', 'android_exclusive.py', 'android_observation.py')})
+                                             'android_import.py', 'android_rewrite.py', 'android_exclusive.py', 'android_observation.py',
+                                             'android_diag_abort.py')},diag_abort_abi_header_sha256=abi_header_sha256())
     return audit, objects
 
 
@@ -186,8 +188,19 @@ def package_pin(path, report, source, nso, metadata):
     if path.stat().st_size > 512*1024*1024:
         raise ValueError('original capsule exceeds hard package bound')
     data = path.read_bytes()
-    if len(data) < 384 or data[:8] != b'DMAMOD02' or struct.unpack_from('<IIII', data, 8) != (2, 0x444d4101, 384, 1):
+    if len(data) < 384 or data[:8] != b'DMAMOD02' or struct.unpack_from('<III', data, 8) != (2, 0x444d4101, 384):
         raise ValueError('original capsule must be checked-stack DMAMOD02')
+    required_flags=struct.unpack_from('<I',data,20)[0]
+    if required_flags not in (1,1|MODULE_REQUIRE_DIAG_ABORT_V1):
+        raise ValueError('original capsule has unknown or inconsistent required ABI flags')
+    receipt=report.get('rewrite',{})
+    if not isinstance(receipt,dict):
+        raise ValueError('original capsule rewrite attestation must be an object')
+    declared=receipt.get('requires_diag_abort_v1',False)
+    if type(declared) is not bool or declared!=bool(required_flags&MODULE_REQUIRE_DIAG_ABORT_V1):
+        raise ValueError('original capsule required ABI flags disagree with rewrite attestation')
+    if not declared and any(key in receipt for key in ('required_diag_abort_abi','diag_abort_call_sites','diag_abort_plt_branches')):
+        raise ValueError('unflagged original capsule carries a required DiagAbort receipt')
     digest = sha(data)
     payload = struct.unpack_from('<Q', data, 112)[0]
     image_size = struct.unpack_from('<Q', data, 24)[0]
@@ -204,6 +217,7 @@ def package_pin(path, report, source, nso, metadata):
         _, _, kind, argument, _, flags = struct.unpack_from('<QQIIII', data, at)
         if kind == 3 or (kind == 1 and argument >= 0x80) or flags:
             raise ValueError('stock capsule contains OBS/private product CUTS')
+    validate_publication_contract(nso,metadata,data,receipt)
     if report.get('unsupported') or report.get('name') != source['name'] or report.get('source_sha256') != source['source_sha256'] or report.get('build_id') != source['build_id'] or report.get('package_sha256') != digest or report.get('image_sha256') != image_digest or report.get('package_size') != len(data) or report.get('source_size') != source['source_bytes'] or report.get('original_image_size') != len(nso.image):
         raise ValueError('successful import attestation does not match actual capsule bytes')
     audit = report.get('callback_audit', {})

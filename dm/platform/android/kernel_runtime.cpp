@@ -119,6 +119,13 @@ HleRuntime::~HleRuntime() {
 }
 bool HleRuntime::resolve(const char* name, bool forced, uintptr_t* address, void* opaque) {
     auto& runtime = *static_cast<HleRuntime*>(opaque);
+    if(name && !std::strcmp(name,DM_DIAG_ABORT_RESOLVER_V1) && forced) {
+        uintptr_t registered=0;
+        if(!address || !runtime.needs_diag_abort_ || !dm_android_diag_abort_entry ||
+           !runtime.registry_.resolve(name,false,&registered) ||
+           registered!=reinterpret_cast<uintptr_t>(dm_android_diag_abort_entry))return false;
+        *address=registered;return true;
+    }
     if (runtime.registry_.resolve(name, forced, address)) return true;
     return runtime.fixture_fallback_ && runtime.fixture_fallback_(name, forced, address, runtime.fixture_context_);
 }
@@ -150,7 +157,7 @@ bool HleRuntime::load(std::vector<std::unique_ptr<ModulePackage>> packages, bool
         if(observation_owned)observation_platform_reset();
         if(bridge_owned)bridge_.unbind();
         if(process_owned)process_.unload();
-        fixture_fallback_=nullptr;fixture_context_=nullptr;needs_parameters_=false;
+        fixture_fallback_=nullptr;fixture_context_=nullptr;needs_parameters_=false;needs_diag_abort_=false;
         std::memset(parameter_seed_,0,sizeof(parameter_seed_));
     };
     try {
@@ -159,9 +166,15 @@ bool HleRuntime::load(std::vector<std::unique_ptr<ModulePackage>> packages, bool
     fixture_fallback_ = fallback;
     fixture_context_ = context;
     needs_parameters_=false;
-    for(const auto& package:packages) if(package && !package->parameters.empty()) needs_parameters_=true;
-    if(needs_parameters_ && !dm_android_capture_guest_parameters(parameter_seed_))
+    needs_diag_abort_=false;
+    for(const auto& package:packages) if(package) {
+        if(!package->parameters.empty())needs_parameters_=true;
+        if(package->required_flags&DM_MODULE_REQUIRE_DIAG_ABORT_V1)needs_diag_abort_=true;
+    }
+    if(needs_parameters_ && !dm_android_capture_guest_parameters(parameter_seed_)) {
+        rollback();
         return fail(error,"profile requires an available real guest parameter provider");
+    }
     load_stage="process load";
     if (!process_.load(std::move(packages), resolve, this, error)) {rollback();return false;}
     process_owned=true;
@@ -337,6 +350,7 @@ bool HleRuntime::shutdown(std::string* error) {
     bridge_.unbind();
     dm_android_host_objects_reset();
     process_.unload();
+    needs_diag_abort_=false;
     loaded_ = has_main_ = closing_ = false;
     return true;
 }
@@ -419,6 +433,28 @@ bool HleRuntime::keyboard_entry_origin(uintptr_t target,uint64_t guest_lr,uintpt
     out->process_=&process_;out->state_=state;out->generation_=state->runtime_generation;
     out->callsite_=site;out->invocation_=keyboard_invocation;return true;
 }
+bool HleRuntime::diag_abort_origin(uint64_t guest_lr,uintptr_t guest_sp,DiagAbortCaller* out) {
+    if(out)*out={};
+    uintptr_t live_sp=0;
+#if defined(__aarch64__)
+    asm volatile("mov %0, sp":"=r"(live_sp));
+#elif defined(__x86_64__)
+    asm volatile("mov %%rsp, %0":"=r"(live_sp));
+#else
+    return false;
+#endif
+    std::lock_guard<std::mutex> lock(runtime_lifecycle);
+    const auto* state=dm_android_peek_guest_state();uintptr_t bottom=0;size_t bytes=0;
+    if(!out || !loaded_ || closing_ || !needs_diag_abort_ || current_runtime.load()!=this ||
+       invoking_runtime!=this || !active_invocations_ || !state || state->user_data!=this ||
+       state->runtime_generation!=process_.load_generation() || state->gate_context!=&process_ ||
+       state->gate_resolver!=Process::gate_resolver || !dm_android_stack_dispatch_context(state) ||
+       (guest_sp&15) || guest_sp<live_sp || guest_sp-live_sp>DM_GUEST_STACK_RESERVE ||
+       !active_guest_stack_bounds(live_sp,&bottom,&bytes) || guest_sp-bottom>bytes ||
+       !dm_android_diag_abort_entry || !registry_.contains_callable(reinterpret_cast<uintptr_t>(dm_android_diag_abort_entry)))
+        return false;
+    return process_.diag_abort_import_caller(guest_lr,out);
+}
 bool HleRuntime::guarded_host_transfer(const DmGuestThreadState& state,
                                       const DmGuestRegisterFrame& frame,const DmGuestGate* gate) const {
     std::lock_guard<std::mutex> lock(runtime_lifecycle);
@@ -428,6 +464,15 @@ bool HleRuntime::guarded_host_transfer(const DmGuestThreadState& state,
        state.gate_context!=&process_ || state.gate_resolver!=Process::gate_resolver ||
        !process_.guarded_host_site(frame.return_pc,gate)) return false;
     const uintptr_t target=frame.x[gate->argument];
+    uintptr_t required=0;
+    if(process_.diag_abort_host_site(frame.return_pc,gate,&required)) {
+        // This target was frozen from the flagged module's original import,
+        // not read again from its writable GOT. No ordinary returning HLE may
+        // satisfy the fatal ABI, even if it is otherwise registered/callable.
+        return needs_diag_abort_ && gate->argument==17 && dm_android_diag_abort_entry &&
+               required==reinterpret_cast<uintptr_t>(dm_android_diag_abort_entry) &&
+               frame.x[17]==required;
+    }
     return target && !(target&3) && (registry_.contains_callable(target) ||
                                   graphics_host_target(target,state.runtime_generation));
 }

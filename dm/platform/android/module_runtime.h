@@ -1,6 +1,7 @@
 #pragma once
 #include "guest_abi.h"
 #include "observation_profile.h"
+#include "diag_abort_abi.h"
 #include <array>
 #include <memory>
 #include <string>
@@ -49,6 +50,7 @@ struct ModulePackage {
     std::vector<DmGuestGate> gates;
     uint32_t wire_version = 1, profile_class = 0;
     bool checked_stack = false;
+    uint32_t required_flags = 0;
     std::array<uint8_t,32> profile_digest{};
     const ObservationProfile* profile = nullptr;
     std::vector<GateProvenance> gate_provenance;
@@ -117,6 +119,7 @@ private:
     std::array<uint8_t,32> load_identity_{};
     std::vector<DmGuestSegment> mapped_segments_;
     bool checked_stack_ = false;
+    uint32_t required_flags_ = 0;
     bool capsule_verified_ = false;
     uint64_t capsule_bytes_ = 0;
     std::array<uint8_t,32> capsule_sha256_{};
@@ -152,6 +155,10 @@ public:
     // Structural source/relocation proof, not original-game authority. Only a
     // direct original BL through the same module's standard static PLT passes.
     bool static_main_import_caller(uint64_t lr,uintptr_t target,const char* symbol,uint64_t* callsite) const;
+    bool diag_abort_import_caller(uintptr_t lr,DiagAbortCaller* out) const;
+    // Query only after guarded_host_site succeeds. A nonzero requirement is
+    // frozen during load and cannot be removed by mutating package metadata.
+    bool diag_abort_host_site(uint64_t return_pc,const DmGuestGate*,uintptr_t* required) const;
     bool checked_stack_entry(uintptr_t entry) const;
     bool observation_present(uint32_t id) const;
     bool copy_readable(uint64_t address, void* staging, size_t bytes) const;
@@ -176,7 +183,7 @@ public:
     bool loaded_callback_roots_match(size_t index, const TrustedCallbackAudit&) const;
 private:
     std::vector<std::unique_ptr<LoadedModule>> modules_;
-    struct FrozenGate { DmGuestGate gate; GateProvenance provenance; bool canonical_v2; bool checked_stack; };
+    struct FrozenGate { DmGuestGate gate; GateProvenance provenance; bool canonical_v2; bool checked_stack; uintptr_t required_target=0; };
     std::unordered_map<uint64_t,FrozenGate> gates_;
     std::unordered_set<uint64_t> callback_roots_;
     bool initializing_ = false, initializer_failed_ = false;

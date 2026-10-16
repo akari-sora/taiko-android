@@ -36,7 +36,7 @@ std::array<uint8_t,32> package_identity(const ModulePackage& p) {
     raw(p.build_id.data(),32);raw(p.source_sha256.data(),32);raw(p.image_sha256.data(),32);
     scalar(p.original_size);scalar(p.symbol_count);scalar(p.string_bytes);
     scalar(p.data_offset);scalar(p.data_bytes);scalar(p.bss_bytes);scalar(p.wire_version);
-    scalar(p.profile_class);raw(p.profile_digest.data(),32);scalar(p.checked_stack);
+    scalar(p.profile_class);raw(p.profile_digest.data(),32);scalar(p.checked_stack);scalar(p.required_flags);
     std::array<uint8_t,32> image_hash{};module_sha256(p.bytes.data(),p.bytes.size(),image_hash.data());
     scalar(p.bytes.size());raw(image_hash.data(),32);
     scalar(p.fixups.size());for(const auto& x:p.fixups){scalar(x.offset);scalar(x.helper);}
@@ -92,6 +92,62 @@ template<class T> T read(const ModulePackage& p, size_t off) {
     return value;
 }
 bool validate_callback_symbols(const ModulePackage&,const TrustedCallbackAudit&,std::string*);
+// The first three immutable instructions identify a standard PLT/GOT pair.
+// The fourth must separately be the admitted typed BR x17 gate.
+bool static_plt_got(const ModulePackage& p,uint64_t plt,uint64_t* got) {
+    if(!got || !range(plt,16,p.original_size) || !range(plt,16,p.bytes.size()) ||
+       !in_segment(p,plt,16,DM_GUEST_READ|DM_GUEST_EXEC))return false;
+    const uint32_t a=read<uint32_t>(p,plt),b=read<uint32_t>(p,plt+4),c=read<uint32_t>(p,plt+8);
+    if((a&0x9f00001fu)!=0x90000010u || (b&0xffc003ffu)!=0xf9400211u ||
+       (c&0xffc003ffu)!=0x91000210u || ((b>>10)&4095)*8!=((c>>10)&4095))return false;
+    int64_t pages=((a>>5)&0x7ffff)*4+((a>>29)&3);
+    if(pages&(1<<20))pages-=1<<21;
+    const int64_t value=static_cast<int64_t>(plt&~uint64_t(4095))+pages*4096+((b>>10)&4095)*8;
+    if(value<0 || !range(static_cast<uint64_t>(value),8,p.original_size) ||
+       !in_segment(p,static_cast<uint64_t>(value),8,DM_GUEST_READ|DM_GUEST_WRITE))return false;
+    *got=static_cast<uint64_t>(value);return true;
+}
+const DmGuestGate* diag_plt_gate(const ModulePackage& p,uint64_t plt) {
+    if(p.wire_version!=2 || p.gate_provenance.size()!=p.gates.size() ||
+       !range(plt,16,p.original_size) || !range(plt,16,p.bytes.size()) ||
+       !in_segment(p,plt,16,DM_GUEST_READ|DM_GUEST_EXEC))return nullptr;
+    for(size_t i=0;i<p.gates.size();++i) {
+        const auto& gate=p.gates[i];const auto& provenance=p.gate_provenance[i];
+        if(provenance.original_offset!=plt+12)continue;
+        if(gate.kind!=DM_GUEST_INDIRECT_HOST || gate.argument!=17 ||
+           provenance.kind!=gate.kind || provenance.argument!=gate.argument ||
+           provenance.return_offset!=gate.return_offset || provenance.flags ||
+           provenance.original_word!=0xd61f0220u)return nullptr;
+        for(const auto& site:p.sites)if(site.original_offset==plt+12) {
+            const uint64_t t=site.trampoline_offset;
+            if(t<p.original_size || (t&3) || !range(t,28,p.bytes.size()) ||
+               !in_segment(p,t,28,DM_GUEST_READ|DM_GUEST_EXEC) || gate.return_offset!=t+16)return nullptr;
+            const uint32_t branch=read<uint32_t>(p,plt+12);
+            const int64_t distance=static_cast<int64_t>(static_cast<int32_t>(branch<<6)>>6)*4;
+            if((branch&0xfc000000u)!=0x14000000u ||
+               static_cast<int64_t>(plt+12)+distance!=static_cast<int64_t>(t) ||
+               read<uint32_t>(p,t)!=0xd10043ffu || read<uint32_t>(p,t+4)!=0xa9007bfdu ||
+               read<uint32_t>(p,t+12)!=0xd63f03c0u || read<uint32_t>(p,t+16)!=0xa9407bfdu ||
+               read<uint32_t>(p,t+20)!=0x910043ffu || read<uint32_t>(p,t+24)!=0xd61f0220u)return nullptr;
+            const uint32_t literal=read<uint32_t>(p,t+8);
+            if((literal&0xff00001fu)!=0x5800001eu)return nullptr;
+            const int64_t displacement=static_cast<int64_t>(static_cast<int32_t>(literal<<8)>>13)*4;
+            const int64_t target=static_cast<int64_t>(t+8)+displacement;
+            if(target<0)return nullptr;
+            const uint64_t helper=static_cast<uint64_t>(target);
+            if(helper<p.original_size || (helper&7) || !range(helper,8,p.bytes.size()) ||
+               !in_segment(p,helper,8,DM_GUEST_READ|DM_GUEST_EXEC) || read<uint64_t>(p,helper))return nullptr;
+            size_t matches=0;
+            for(const auto& fixup:p.fixups)if(fixup.offset==helper) {
+                if(fixup.helper!=DM_GUEST_DISPATCH_HELPER)return nullptr;
+                ++matches;
+            }
+            return matches==1?&gate:nullptr;
+        }
+        return nullptr;
+    }
+    return nullptr;
+}
 }
 
 ModulePackage::ModulePackage(const ModulePackage& other) { *this=other; }
@@ -106,6 +162,7 @@ ModulePackage& ModulePackage::operator=(const ModulePackage& p) {
     data_offset=p.data_offset;data_bytes=p.data_bytes;bss_bytes=p.bss_bytes;
     bytes=p.bytes;fixups=p.fixups;gates=p.gates;wire_version=p.wire_version;
     checked_stack=p.checked_stack;
+    required_flags=p.required_flags;
     profile_class=p.profile_class;profile_digest=p.profile_digest;profile=p.profile;
     gate_provenance=p.gate_provenance;parameters=p.parameters;sites=p.sites;segments=p.segments;
     image=p.image;
@@ -205,7 +262,9 @@ bool decode_package(const uint8_t* blob, size_t size, const uint8_t* expected_di
     if ((version != 1 && version != 2) || size < header ||
         memcmp(blob, version == 1 ? "DMAMOD01" : "DMAMOD02", 8) ||
         u32(blob + 12) != DM_ANDROID_GUEST_ABI || u32(blob + 16) != header ||
-        (u32(blob + 20)&~(version==2?1u:0u)) || !zero(blob + 296, 24))
+        (u32(blob + 20)&~(version==2?(1u|DM_MODULE_REQUIRE_DIAG_ABORT_V1):0u)) ||
+        ((u32(blob+20)&DM_MODULE_REQUIRE_DIAG_ABORT_V1) && !(u32(blob+20)&1u)) ||
+        !zero(blob + 296, 24))
         return fail(error, "invalid module format, ABI, flags or reserved header");
     if (version == 2 && (u32(blob+356) != 32 || u32(blob+376) != 40 || u32(blob+380)))
         return fail(error, "invalid extended metadata strides or reserved word");
@@ -271,6 +330,7 @@ bool decode_package(const uint8_t* blob, size_t size, const uint8_t* expected_di
         auto package = std::make_unique<ModulePackage>();
         package->wire_version = version;
         package->checked_stack = (u32(blob+20)&1)!=0;
+        package->required_flags = u32(blob+20)&DM_MODULE_REQUIRE_DIAG_ABORT_V1;
         if (version == 2) {
             package->profile_class = u32(blob+352);
             memcpy(package->profile_digest.data(),blob+320,32);
@@ -647,6 +707,9 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
                !package->bytes.size() || package->bytes.size()>1024u*1024u*1024u-total)
                 return fail(error,"invalid, duplicate or excessive process modules (aggregate 1 GiB limit)");
             total+=package->bytes.size();
+            if((package->required_flags&~DM_MODULE_REQUIRE_DIAG_ABORT_V1) ||
+               (package->required_flags && (!package->checked_stack || package->wire_version!=2)))
+                return fail(error,"invalid required diagnostic ABI flags");
             if(package->checked_stack!=checked || (package->checked_stack &&
                (!package->stack_admitted_ || package->stack_identity_!=package_identity(*package))))
                 return fail(error,"mixed or altered checked-stack module graph");
@@ -661,6 +724,7 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
             m->load_identity_=package_identity(*m->package);
             m->mapped_segments_=m->package->segments;
             m->checked_stack_=m->package->checked_stack;
+            m->required_flags_=m->package->required_flags;
             m->capsule_verified_=m->package->capsule_verified_;
             m->capsule_bytes_=m->package->capsule_bytes_;
             m->capsule_sha256_=m->package->capsule_sha256_;
@@ -672,10 +736,34 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
             candidate.push_back(std::move(m));
         }
         for(const auto& m:candidate) {
+            size_t required_bindings=0;
             for(const auto& r:m->dynamic->relocations) {
                 const auto& s=m->dynamic->symbols[ELF64_R_SYM(r.r_info)];
                 const char* name=symbol_name(*m,s); uintptr_t address=0,value=0;
-                if(ELF64_R_TYPE(r.r_info)==1027) address=reinterpret_cast<uintptr_t>(m->mapping.base);
+                if((m->required_flags_&DM_MODULE_REQUIRE_DIAG_ABORT_V1) &&
+                   !std::strcmp(name,DM_DIAG_ABORT_IMPL_SYMBOL)) {
+                    const uintptr_t canonical=reinterpret_cast<uintptr_t>(&dm_android_diag_abort_entry);
+                    if(ELF64_R_TYPE(r.r_info)!=1026 || r.r_addend || !canonical || !resolver ||
+                       !resolver(DM_DIAG_ABORT_RESOLVER_V1,true,&address,context) || address!=canonical)
+                        return fail(error,m->package->name+": required diagnostic abort ABI binding unavailable or invalid");
+                    ++required_bindings;
+                    size_t plt_count=0;
+                    // This scan only rejects incomplete contract coverage; it
+                    // grants no code, callback, or arbitrary target authority.
+                    for(const auto& segment:m->package->segments) {
+                        if(!(segment.flags&DM_GUEST_EXEC))continue;
+                        for(uint64_t plt=segment.offset;range(plt,16,m->package->original_size) &&
+                            range(plt-segment.offset,16,segment.size);plt+=4) {
+                            uint64_t got=0;
+                            if(!static_plt_got(*m->package,plt,&got) || got!=r.r_offset)continue;
+                            if(!diag_plt_gate(*m->package,plt))
+                                return fail(error,m->package->name+": required diagnostic PLT lacks canonical guarded BR x17");
+                            ++plt_count;
+                        }
+                    }
+                    if(!plt_count)return fail(error,m->package->name+": required diagnostic relocation has no guarded static PLT");
+                }
+                else if(ELF64_R_TYPE(r.r_info)==1027) address=reinterpret_cast<uintptr_t>(m->mapping.base);
                 else if(!ELF64_R_SYM(r.r_info)) address=0; // ELF null symbol has value zero.
                 else {
                     bool found=resolver && resolver(name,true,&address,context);
@@ -691,6 +779,8 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
                 if(!addend(address,r.r_addend,&value)) return fail(error,"relocation address/addend overflow");
                 memcpy(static_cast<uint8_t*>(m->mapping.base)+r.r_offset,&value,8);
             }
+            if((m->required_flags_&DM_MODULE_REQUIRE_DIAG_ABORT_V1) && !required_bindings)
+                return fail(error,m->package->name+": required diagnostic abort ABI has no relocation");
         }
         std::unordered_map<uint64_t,FrozenGate> candidate_gates;
         std::unordered_set<uint64_t> candidate_callback_roots;
@@ -709,7 +799,16 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
                     return fail(error,"ambiguous observation namespace or duplicate ID");
                 const bool v2=m->package->wire_version==2;
                 const GateProvenance provenance=v2?m->package->gate_provenance[i]:GateProvenance{};
-                if(!candidate_gates.emplace(base+gate.return_offset,FrozenGate{gate,provenance,v2,m->checked_stack_}).second)
+                uintptr_t required_target=0;
+                if((m->required_flags_&DM_MODULE_REQUIRE_DIAG_ABORT_V1) && provenance.original_offset>=12) {
+                    uint64_t got=0;
+                    if(static_plt_got(*m->package,provenance.original_offset-12,&got))
+                        for(const auto& relocation:m->dynamic->relocations)
+                            if(relocation.r_offset==got && ELF64_R_TYPE(relocation.r_info)==1026 && !relocation.r_addend &&
+                               !std::strcmp(symbol_name(*m,m->dynamic->symbols[ELF64_R_SYM(relocation.r_info)]),DM_DIAG_ABORT_IMPL_SYMBOL))
+                                required_target=reinterpret_cast<uintptr_t>(&dm_android_diag_abort_entry);
+                }
+                if(!candidate_gates.emplace(base+gate.return_offset,FrozenGate{gate,provenance,v2,m->checked_stack_,required_target}).second)
                     return fail(error,"duplicate absolute process gate");
             }
         }
@@ -908,6 +1007,74 @@ bool Process::static_main_import_caller(uint64_t lr,uintptr_t target,const char*
         return false;
     }
     return false;
+}
+bool Process::diag_abort_import_caller(uintptr_t lr,DiagAbortCaller* out) const {
+    if(out)*out={};
+    const uintptr_t canonical=reinterpret_cast<uintptr_t>(&dm_android_diag_abort_entry);
+    if(!out || !canonical || lr<4 || (lr&3))return false;
+    for(const auto& m:modules_) {
+        const auto& p=*m->package;
+        const uintptr_t base=reinterpret_cast<uintptr_t>(m->mapping.base);
+        if(lr<base+4 || lr-base>p.original_size)continue;
+        if(!(m->required_flags_&DM_MODULE_REQUIRE_DIAG_ABORT_V1) ||
+           p.required_flags!=m->required_flags_ || !m->checked_stack_ || !p.checked_stack ||
+           !m->mapping.sealed || m->load_identity_!=package_identity(p))return false;
+        const uint64_t call=lr-base-4;
+        if(!in_segment(p,call,4,DM_GUEST_READ|DM_GUEST_EXEC))return false;
+        const uint32_t bl=read<uint32_t>(p,call);
+        uint32_t mapped_bl=0;
+        std::memcpy(&mapped_bl,static_cast<const uint8_t*>(m->mapping.base)+call,4);
+        if(bl!=mapped_bl || (bl&0xfc000000u)!=0x94000000u)return false;
+        const int64_t distance=static_cast<int64_t>(static_cast<int32_t>(bl<<6)>>6)*4;
+        const int64_t plt_signed=static_cast<int64_t>(call)+distance;
+        if(plt_signed<0)return false;
+        const uint64_t plt=static_cast<uint64_t>(plt_signed);
+        if(!range(plt,16,p.original_size) || !in_segment(p,plt,16,DM_GUEST_READ|DM_GUEST_EXEC))return false;
+        uint32_t words[4]{};
+        std::memcpy(words,p.bytes.data()+plt,sizeof(words));
+        if(std::memcmp(words,static_cast<const uint8_t*>(m->mapping.base)+plt,sizeof(words)) ||
+           (words[0]&0x9f00001fu)!=0x90000010u || (words[1]&0xffc003ffu)!=0xf9400211u ||
+           (words[2]&0xffc003ffu)!=0x91000210u ||
+           ((words[1]>>10)&4095)*8!=((words[2]>>10)&4095))return false;
+        const DmGuestGate* contract_gate=diag_plt_gate(p,plt);
+        uintptr_t required=0;
+        if(!contract_gate || !diag_abort_host_site(base+contract_gate->return_offset,
+             gate_resolver(const_cast<Process*>(this),base+contract_gate->return_offset),&required) || required!=canonical)return false;
+        const uint64_t trampoline=contract_gate->return_offset-16;
+        if(std::memcmp(p.bytes.data()+trampoline,static_cast<const uint8_t*>(m->mapping.base)+trampoline,28))return false;
+        // Only the fourth PLT word has the mandatory canonical typed rewrite.
+        for(const auto& site:p.sites)
+            if(site.original_offset==call || (site.original_offset>=plt && site.original_offset<plt+12))return false;
+        int64_t pages=((words[0]>>5)&0x7ffff)*4+((words[0]>>29)&3);
+        if(pages&(1<<20))pages-=1<<21;
+        const int64_t got_signed=static_cast<int64_t>((base+plt)&~uintptr_t(4095))+pages*4096+
+            ((words[1]>>10)&4095)*8;
+        if(got_signed<0 || static_cast<uint64_t>(got_signed)<base)return false;
+        const uint64_t got=static_cast<uint64_t>(got_signed)-base;
+        if(!in_segment(p,got,8,DM_GUEST_READ|DM_GUEST_WRITE) || !range(got,8,p.original_size))return false;
+        uint64_t current=0;
+        std::memcpy(&current,static_cast<const uint8_t*>(m->mapping.base)+got,8);
+        if(current!=canonical)return false;
+        size_t matches=0;
+        for(const auto& rel:m->dynamic->relocations) {
+            if(rel.r_offset!=got)continue;
+            const auto& entry=m->dynamic->symbols[ELF64_R_SYM(rel.r_info)];
+            const char* name=symbol_name(*m,entry);
+            if(ELF64_R_TYPE(rel.r_info)!=1026 || rel.r_addend ||
+               !name || std::strcmp(name,DM_DIAG_ABORT_IMPL_SYMBOL))return false;
+            ++matches;
+        }
+        if(matches!=1)return false;
+        out->module=p.name.c_str();out->callsite=call;return true;
+    }
+    return false;
+}
+bool Process::diag_abort_host_site(uint64_t return_pc,const DmGuestGate* gate,uintptr_t* required) const {
+    if(required)*required=0;
+    if(!required)return false;
+    const auto found=gates_.find(return_pc);
+    if(found==gates_.end() || gate!=&found->second.gate || !found->second.required_target)return false;
+    *required=found->second.required_target;return true;
 }
 bool Process::stack_check_site(uint64_t return_pc,const DmGuestGate* gate) const {
     const auto found=gates_.find(return_pc);
