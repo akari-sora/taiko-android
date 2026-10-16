@@ -74,6 +74,25 @@ class StackCheckTests(unittest.TestCase):
             with self.subTest(word=hex(other)),self.assertRaises(ar.RewriteError):
                 ar.rewrite(raw(other,0xD65F03C0),package_version=2,checked_stack=True)
 
+    def test_taiko_128_byte_alignment_preserves_instruction_and_stack_gate(self):
+        # main+0x150f588: AND SP, X9, #0xffffffffffffff80.
+        # The original instruction still runs after the same bounded preflight.
+        value=0x9279E13F
+        op=ar.stack_check_operation(value)
+        self.assertIsNotNone(op)
+        self.assertEqual(op,dict(source=9,delta=0,access_bytes=0,post_index=False,
+                                 alignment_mask=0xFFFFFFFFFFFFFF80))
+        image=ar.rewrite(raw(value,0xD65F03C0),package_version=2,checked_stack=True)
+        self.assertEqual(len(image.gates),1)
+        gate=image.gates[0]
+        self.assertEqual((gate.kind,gate.argument),(5,value))
+        self.assertEqual(struct.unpack_from('<I',image.bytes,gate.return_offset+8)[0],value)
+        for source in (18,31):
+            unsafe=(value&~(31<<5))|(source<<5)
+            self.assertIsNone(ar.stack_check_operation(unsafe))
+            with self.assertRaises(ar.RewriteError):
+                ar.rewrite(raw(unsafe,0xD65F03C0),package_version=2,checked_stack=True)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1900,7 +1900,8 @@ def stack_check_operation(value):
         return {'source':31,'delta':-16 if value==0xA9BF4FF2 else 16,
                 'access_bytes':16,'post_index':value==0xA8C14FF2}
     source = value >> 5 & 31
-    alignment = {0x9274CC1F: 4095, 0x927BE81F: 31, 0x927AE41F: 63}.get(value & 0xFFFFFC1F)
+    alignment = {0x9274CC1F: 4095, 0x927BE81F: 31, 0x927AE41F: 63,
+                 0x9279E01F: 127}.get(value & 0xFFFFFC1F)
     if alignment is not None:
         if source in (18, 31):
             return None

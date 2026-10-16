@@ -15,9 +15,9 @@ inline bool dm_android_decode_stack_check(uint32_t w,DmGuestStackOperation* out=
     const unsigned rn=(w>>5)&31,rt=w&31,rt2=(w>>10)&31;
     DmGuestStackOperation op{rn,0,0,false};
     const uint32_t alignment=w&0xfffffc1fu;
-    if(alignment==0x9274cc1fu || alignment==0x927be81fu || alignment==0x927ae41fu) {
+    if(alignment==0x9274cc1fu || alignment==0x927be81fu || alignment==0x927ae41fu || alignment==0x9279e01fu) {
         if(rn==18 || rn==31) return false;
-        op.alignment_mask=UINT64_MAX-(alignment==0x9274cc1fu?4095:alignment==0x927be81fu?31:63);
+        op.alignment_mask=UINT64_MAX-(alignment==0x9274cc1fu?4095:alignment==0x927be81fu?31:alignment==0x927ae41fu?63:127);
     } else if((w&0xbf80001fu)==0x9100001fu) {
         const uint32_t amount=((w>>10)&4095)<<((w&(1u<<22))?12:0);
         if(rn==18 || amount>1048576 || (rn==31 && (amount&15))) return false;
