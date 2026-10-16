@@ -128,6 +128,7 @@ class Image:
     checked_stack: bool = False
     checked_calls: tuple = ()
     checked_call_forests: tuple = ()
+    native_transfer_proofs: tuple = ()
 
     def metadata(self):
         result = {'target': self.target, 'abi': self.abi, 'size': len(self.bytes),
@@ -149,6 +150,8 @@ class Image:
                                        for pc, target in self.checked_calls]
         if self.checked_call_forests:
             result['checked_call_forests'] = [dict(item) for item in self.checked_call_forests]
+        if self.native_transfer_proofs:
+            result['native_transfer_proofs'] = [dict(item) for item in self.native_transfer_proofs]
         return result
 
     def validate(self):
@@ -2262,6 +2265,62 @@ def _native_table_writes(ins):
     return writes
 
 
+def native_transfer_plan(ins, by_pc, entries, raw, kinds, protected_ranges=()):
+    """Re-prove a finite native BR from immutable source, never a target hint.
+
+    Only ADR/ADRP and at most one same-register 64-bit ADD are supported.
+    Intermediate entries and opaque gates invalidate the reaching value.
+    Checked SP operations retain their existing full-GPR preservation ABI.
+    """
+    if ins.mnemonic != 'br' or len(ins.bytes) != 4 or ins.size != 4:
+        return None
+    value = struct.unpack('<I', ins.bytes)[0]
+    register = value >> 5 & 31
+    if (value & 0xFFFFFC1F != 0xD61F0000 or register in (18,29,30,31) or
+            kinds.get(ins.address,'missing') is not None or ins.address in entries):
+        return None
+    def original(pc, op):
+        return (op is not None and op.size == 4 and len(op.bytes) == 4 and
+                0 <= pc <= len(raw)-4 and bytes(op.bytes) == raw[pc:pc+4] and
+                not any(start < pc+4 and pc < end for start,end in protected_ranges))
+    if not original(ins.address, ins):
+        return None
+    words = [(ins.address,value)]
+    adjustment, added = 0, False
+    for pc in range(ins.address-4,max(-1,ins.address-4*17),-4):
+        op = by_pc.get(pc)
+        if not original(pc, op) or is_fatal_instruction(op):
+            return None
+        if any(op.group(group) for group in (CS_GRP_CALL,CS_GRP_JUMP,CS_GRP_RET)):
+            return None
+        word_ = struct.unpack('<I',op.bytes)[0]
+        kind = kinds.get(pc,'missing')
+        if kind == 'stack_check':
+            if stack_check_operation(word_) is None:
+                return None
+        elif kind is not None or site_kind(op) is not None:
+            return None
+        words.append((pc,word_))
+        if 'x'+str(register) in _native_table_writes(op):
+            if word_ & 0x9F00001F in (0x10000000|register,0x90000000|register):
+                target = op.operands[-1].imm + adjustment
+                target_ins = by_pc.get(target)
+                if (target not in entries or not original(target,target_ins) or
+                        is_fatal_instruction(target_ins)):
+                    return None
+                return dict(offset=ins.address,target=target,producer=pc,
+                            source_words=tuple(reversed(words)),rule='native-immutable-constant-br-v1')
+            if (pc not in entries and not added and
+                    word_ & 0xFFC003FF == 0x91000000 | register<<5 | register):
+                adjustment = word_>>10 & 4095
+                added = True
+                continue
+            return None
+        if pc in entries:
+            return None
+    return None
+
+
 def _native_u16_wide_schedule(load, branch, compare, base, roles, by_pc, tables):
     """Three exact unsigned schedules, each using the actual leaf read guard."""
     target,loaded,table,index=roles
@@ -3549,7 +3608,8 @@ class Emitter:
 def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offset=None, entry_offsets=None, profile=None,
             indirect_policy='strict', package_version=1, guarded_indirect_offsets=(), checked_stack=False,
             readonly_ranges=(), proven_guest_indirect_offsets=(), checked_call_targets=None, protected_ranges=(),
-            checked_call_forest_offsets=(), checked_call_forest_targets=(), independent_entry_offsets=None):
+            checked_call_forest_offsets=(), checked_call_forest_targets=(), independent_entry_offsets=None,
+            native_transfer_candidates=None):
     """Rewrite selected ARM64 code while preserving all other raw image bytes.
 
     Ranges are image-relative, half-open (start, end) pairs within text_size.
@@ -3578,6 +3638,13 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
         raise RewriteError('guarded host transfers require package version 2')
     if not isinstance(checked_stack, bool) or (checked_stack and package_version != 2):
         raise RewriteError('checked stack requires explicit boolean and package version 2')
+    if native_transfer_candidates is not None and not isinstance(native_transfer_candidates,Mapping):
+        raise RewriteError('native transfer candidates must be an explicit mapping')
+    transfer_candidates = dict(native_transfer_candidates or {})
+    if transfer_candidates and (not checked_stack or package_version != 2):
+        raise RewriteError('native transfer candidates require checked v2')
+    if any(type(pc) is not int or type(target) is not int for pc,target in transfer_candidates.items()):
+        raise RewriteError('native transfer candidate offsets/targets must be integers')
     guarded = set(guarded_indirect_offsets)
     if checked_call_targets is not None and not isinstance(checked_call_targets, Mapping):
         raise RewriteError('checked call targets must be an explicit mapping')
@@ -3758,6 +3825,25 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
         native_wait_transfers[pc]=('finite',tuple(sorted({plan['base']+value*4 for value in values})))
     native_wait_transfers.update((pc,('checked-call',(target,))) for pc,target in checked_calls.items())
     native_wait_transfers.update((pc,('checked-call-forest',forest_targets)) for pc in forest_sites)
+    transfer_entries = roots | direct_entries
+    transfer_entries.update(target for _,targets in native_wait_transfers.values() for target in targets)
+    transfer_proofs = {}
+    for pc,target in sorted(transfer_candidates.items()):
+        if (pc not in by_pc or pc in native_wait_transfers or target not in independent_roots or
+                target not in by_pc):
+            raise RewriteError('native transfer candidate lacks distinct selected independent entry facts')
+        plan = native_transfer_plan(by_pc[pc],by_pc,transfer_entries,raw,kinds,protected_ranges)
+        if plan is None or plan['target'] != target:
+            raise RewriteError(f'0x{pc:x}: native transfer candidate source/target proof failed')
+        transfer_proofs[pc] = plan
+    # Only verified complete targets enter the final context. Re-prove every
+    # producer window against all guest targets, never candidate assertions.
+    native_wait_transfers.update((pc,('finite',(plan['target'],))) for pc,plan in transfer_proofs.items())
+    final_transfer_entries = roots | direct_entries
+    final_transfer_entries.update(target for _,targets in native_wait_transfers.values() for target in targets)
+    for pc,plan in transfer_proofs.items():
+        if native_transfer_plan(by_pc[pc],by_pc,final_transfer_entries,raw,kinds,protected_ranges) != plan:
+            raise RewriteError(f'0x{pc:x}: native transfer source invalidated by final transfer entries')
     regions = android_exclusive.plan_regions(instructions, kinds, roots, sys.modules[__name__],
                                             native_wait_transfers=native_wait_transfers)
     region_entries = {region.entry: region for region in regions}
@@ -3813,7 +3899,8 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
                  parameters=tuple(profile.parameters) if profile is not None else (),
                  indirect_policy=indirect_policy, package_version=package_version, checked_stack=checked_stack,
                  checked_calls=tuple(sorted(checked_calls.items())),
-                 checked_call_forests=(forest,) if forest is not None else ()).validate()
+                 checked_call_forests=(forest,) if forest is not None else (),
+                 native_transfer_proofs=tuple(transfer_proofs.values())).validate()
 
 
 def main():

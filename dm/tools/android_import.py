@@ -17,7 +17,7 @@ from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, CS_GRP_JUMP, CS_GRP_CALL, C
 from capstone.arm64_const import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG, ARM64_REG_X0
 from android_rewrite import (ABI, INDIRECT_HOST, FatalWord, RewriteError, rewrite, site_kind,
                              indirect_register, is_fatal_word, is_fatal_instruction, stack_check_operation, has18,
-                             byte_jump_table,halfword_jump_table,readonly_guest_table,x18_jump_table)
+                             byte_jump_table,halfword_jump_table,readonly_guest_table,x18_jump_table,native_transfer_plan)
 from nso_format import NsoError, parse_nso, parse_metadata
 from android_profiles import resolve_profile
 from android_instruction import Instruction
@@ -791,7 +791,25 @@ again by the independent rewrite stage.
             ranges[-1] = (ranges[-1][0], pc + 4)
         else:
             ranges.append((pc, pc + 4))
+    # Record only source-verified native candidates. The raw rewriter repeats
+    # the source proof with its final lowering/entry context; these are hints.
+    native_candidates = {}
+    function_entries = set(metadata.eh_starts)
+    function_entries.update(symbol.value for symbol in metadata.symbols
+                            if symbol.kind == 2 and symbol.size >= 4 and symbol.section not in (0,0xFFF1))
+    source_kinds = {pc:site_kind(op) for pc,op in instructions.items()}
+    for ins in indirect:
+        if ins.mnemonic != 'br' or ins.address not in proven_sites or ins.address in byte_jumps or ins.address in guest_tables:
+            continue
+        target = register_value(ins.operands[0].reg,ins.address)
+        if not target or target[0] not in ('address','code') or target[1] not in function_entries:
+            continue
+        plan = native_transfer_plan(ins,instructions,direct_targets,nso.image,source_kinds,
+                                    ((0,header_end),*metadata.protected,*literal_ranges))
+        if plan is not None and plan['target'] == target[1]:
+            native_candidates[ins.address] = target[1]
     report = {'roots': sorted(roots), 'independent_roots': sorted(independent_roots), 'function_extents': sorted(extents),
+                    'native_transfer_candidates': [dict(offset=pc,target=target) for pc,target in sorted(native_candidates.items())],
                     'selected_words': len(instructions), 'proven_indirect_sites': [x.address for x in indirect if x.address in proven_sites],
                     'address_taken_roots': sorted(address_taken_roots), 'proven_literal_ranges': sorted(literal_ranges),
                     'indirect_memory_policy': 'relocation-backed targets; reject discovered overlapping/unknown-alias writes and writable-image pointers passed to imports; trusted host ABI',
@@ -958,7 +976,8 @@ def import_module(source, name, *, package_version=1, profile=None, indirect_pol
                     checked_call_targets={item['offset']: item['target']
                                           for item in code_report.get('versioned_checked_calls', ())},
                     checked_call_forest_offsets=tuple(caller['offset'] for caller in forest_contract['callers']) if forest_contract else (),
-                    checked_call_forest_targets=forest_contract['targets'] if forest_contract else ())
+                    checked_call_forest_targets=forest_contract['targets'] if forest_contract else (),
+                    native_transfer_candidates={row['offset']:row['target'] for row in code_report['native_transfer_candidates']})
     package = make_package(name, nso, metadata, image, patch_offset, package_version)
     report = {'name': name, 'source_sha256': nso.source_sha256.hex(), 'build_id': nso.build_id.hex(),
               'image_sha256': hashlib.sha256(image.bytes).hexdigest(), 'package_sha256': hashlib.sha256(package).hexdigest(),

@@ -475,6 +475,56 @@ NATIVE_CONDITIONAL_WORDS = (
         0xEB0A013F, 0x54FFFEE1, 0xC80AFD18, 0x35FFFECA,
         0x5280002B, 0xAA0903EA, 0x34FFFECB,
     ),
+    (
+        0x0B09010A, 0x6B0B015F, 0x885F7E6A, 0x4B08016C,
+        0x1A89C189, 0x6B08015F, 0x540000C1, 0x0B08012B,
+        0x880CFE6B, 0x3500008C, 0x5280002B, 0x14000003,
+        0xD5033F5F, 0x2A1F03EB, 0x3700010B, 0xB94041AB,
+        0x6B0A017F, 0x2A0A03E8, 0x54FFFDC1,
+    ),
+    (
+        0x0B09010A, 0x6B0B015F, 0x885F7E6A, 0x4B08016C,
+        0x1A89C189, 0x6B08015F, 0x540000C1, 0x0B08012B,
+        0x880CFE6B, 0x3500008C, 0x5280002B, 0x14000003,
+        0xD5033F5F, 0x2A1F03EB, 0x3700010B, 0xB940F9AB,
+        0x6B0A017F, 0x2A0A03E8, 0x54FFFDC1,
+    ),
+    (
+        0x0B09010A, 0x6B0B015F, 0x885F7E6A, 0x4B08016C,
+        0x1A89C189, 0x6B08015F, 0x540000C1, 0x0B08012B,
+        0x880CFE6B, 0x3500008C, 0x5280002B, 0x14000003,
+        0xD5033F5F, 0x2A1F03EB, 0x3700010B, 0xB941D9AB,
+        0x6B0A017F, 0x2A0A03E8, 0x54FFFDC1,
+    ),
+    (
+        0x0B09010A, 0x6B0B015F, 0x885F7E6A, 0x4B08016C,
+        0x1A89C189, 0x6B08015F, 0x540000C1, 0x0B08012B,
+        0x880CFE6B, 0x3500008C, 0x5280002B, 0x14000003,
+        0xD5033F5F, 0x2A1F03EB, 0x3700010B, 0xB941F1AB,
+        0x6B0A017F, 0x2A0A03E8, 0x54FFFDC1,
+    ),
+    (
+        0x0B09010A, 0x6B0B015F, 0x885F7E6A, 0x4B08016C,
+        0x1A89C189, 0x6B08015F, 0x540000C1, 0x0B08012B,
+        0x880CFE6B, 0x3500008C, 0x5280002B, 0x14000003,
+        0xD5033F5F, 0x2A1F03EB, 0x3700010B, 0xB94241AB,
+        0x6B0A017F, 0x2A0A03E8, 0x54FFFDC1,
+    ),
+    (
+        0x0B09010A, 0x6B0B015F, 0x885F7E6A, 0x4B08016C,
+        0x1A89C189, 0x6B08015F, 0x540000C1, 0x0B08012B,
+        0x880CFE6B, 0x3500008C, 0x5280002B, 0x14000003,
+        0xD5033F5F, 0x2A1F03EB, 0x3700010B, 0xB94549AB,
+        0x6B0A017F, 0x2A0A03E8, 0x54FFFDC1,
+    ),
+    (
+        0x0B09010A, 0x6B0B015F, 0x885F7E6A, 0x4B08016C,
+        0x1A89C189, 0x6B08015F, 0x540000C1, 0x0B08012B,
+        0x880CFE6B, 0x3500008C, 0x5280002B, 0x14000003,
+        0xD5033F5F, 0x2A1F03EB, 0x3700010B, 0xB94C91AB,
+        0x6B0A017F, 0x2A0A03E8, 0x54FFFDC1,
+    ),
+    (0xF9000049, 0x9100050A, 0x5280002B, 0xC87F340C, 0xEB0801BF, 0x540000A1, 0xEB09019F, 0x54000061, 0xC82BA801, 0x35FFFF4B, 0xD5033F5F, 0xAA0D03E8, 0xAA0C03E9, 0xB5FFFE6B),
 )
 NATIVE_CONDITIONAL_FIELDS = (
     ((0,5),(5,16),(),(5,),(),(0,16),(),(0,5),(5,16),(),
@@ -513,6 +563,14 @@ NATIVE_CONDITIONAL_FIELDS = (
     ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
     ((0, 5), (5, 16), (), (0, 5), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0, 16), (0,), (5,), (0, 16), ()),
     ((), (0, 16), (0, 16), (0,), (0, 5), (0,), (0, 5), (0, 5), (5, 16), (), (0, 5, 16), (0,), (0,), (0, 16), (0,)),
+    ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
+    ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
+    ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
+    ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
+    ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
+    ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
+    ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
+    ((0, 5), (0, 5), (0,), (0, 5, 10), (0, 5, 16), (), (0, 5, 16), (), (0, 5, 10, 16), (0,), (), (0, 5, 16), (0, 5, 16), (0,)),
 )
 
 
@@ -608,6 +666,100 @@ def native_wait_mutex(start, by_pc, kinds, api):
     return None
 
 
+NATIVE_TRY_MUTEX_WORDS = (
+    0x79420274,0x11000696,0x91004015,0xF98002B0,0x79020276,0x885FFEA8,
+    0x34000188,0xD5033F5F,0x79020274,0x35000094,0x79420668,0x34000048,
+    0x94016870,0x2A1F03E0,0xA9427BFD,0xA9414FF4,0xA8C357F6,0xD65F03C0,
+    0x34000194,0x52800020,0x88087EA0,0x34FFFF28,0x79020274,0x79020276,
+    0x885FFEA8,0x34FFFF68,0x17FFFFED,0x79020276,0x885FFEA8,0x35FFFD48,
+    0x52800020,0x88087EA0,0x34FFFDC8,0x7902027F,0x79420668,0x34FFFF08,
+    0x94016858,0x17FFFFF6,
+)
+
+NATIVE_TRY_MUTEX_FIELDS = (
+    (0,5),(0,5),(0,5),(5,),(0,5),(0,5),(0,),(),(0,5),(0,),
+    (0,5),(0,),(),(0,),(),(0,10),(0,10),(),(0,),(0,),(0,5,16),(0,),
+    (0,5),(0,5),(0,5),(0,),(),(0,5),(0,5),(0,),(0,),(0,5,16),(0,),
+    (0,5),(0,5),(0,),(),(),
+)
+
+
+NATIVE_TRY_MUTEX_DIRECT_WORDS = (
+    0x79420295, 0xF9800010, 0x110006B6, 0x79020296,
+    0x885FFC08, 0x34000188, 0xD5033F5F, 0x79020295,
+    0x35000095, 0x79420688, 0x34000048, 0x94016E4E,
+    0x2A1F03E0, 0xA9424FF4, 0xA94157F6, 0xA8C37BFD,
+    0xD65F03C0, 0xAA0003F3, 0x34000195, 0x52800020,
+    0x88087E60, 0x34FFFF08, 0x79020295, 0x79020296,
+    0x885FFE68, 0x34FFFF68, 0x17FFFFEC, 0x79020296,
+    0x885FFE68, 0x35FFFD28, 0x52800020, 0x88087E60,
+    0x34FFFDA8, 0x7902029F, 0x79420688, 0x34FFFF08,
+    0x94016E35, 0x17FFFFF6,
+)
+NATIVE_TRY_MUTEX_DIRECT_FIELDS = ((0, 5), (5,), (0, 5), (0, 5), (0, 5), (0,), (), (0, 5), (0,), (0, 5), (0,), (), (0,), (0, 10), (0, 10), (), (), (0, 16), (0,), (0,), (0, 5, 16), (0,), (0, 5), (0, 5), (0, 5), (0,), (), (0, 5), (0, 5), (0,), (0,), (0, 5, 16), (0,), (0, 5), (0, 5), (0,), (), ())
+
+# Both exact source layouts use the shared native try-mutex validator. The
+# direct-cell layout keeps ABI W0/X0 fixed through its live X19<-X0 bridge.
+NATIVE_TRY_MUTEX_LAYOUTS = (
+    (NATIVE_TRY_MUTEX_WORDS,NATIVE_TRY_MUTEX_FIELDS,20,19,(12,36),(14,15,16,17),(20,96,112),False),
+    (NATIVE_TRY_MUTEX_DIRECT_WORDS,NATIVE_TRY_MUTEX_DIRECT_FIELDS,16,20,(11,36),(13,14,15,16),(16,96,112),True),
+)
+
+
+def native_try_mutex(start, by_pc, kinds, api):
+    """Keep two exact nonblocking mutex retry schedules and closed SP holes.
+
+    Shared parent040 validation retains its original row and ordinary role
+    renames. Only the second observed layout fixes ABI role0: its initial X0
+    cell and later X19 cell are connected by the original live-reservation MOV.
+    The caller protects the preceding normal TLS producer, typed transfers,
+    union occupancy and all fresh heads. Runtime pin-state support is separate.
+    """
+    for words,fields,head_offset,tls_role,call_indices,hole_indices,head_offsets,fixed_zero in NATIVE_TRY_MUTEX_LAYOUTS:
+        begin=start.address-head_offset
+        if begin<0:continue
+        block=tuple(by_pc.get(begin+i*4) for i in range(len(words)))
+        if any(ins is None for ins in block):continue
+        roles,reverse=({0:0},{0:0}) if fixed_zero else ({},{})
+        matched=True
+        for index,(ins,expected,shifts) in enumerate(zip(block,words,fields)):
+            value=struct.unpack('<I',ins.bytes)[0]
+            mask=sum(31<<shift for shift in shifts)
+            if index in call_indices:mask|=0x3FFFFFF
+            if value&~mask!=expected&~mask:
+                matched=False;break
+            for shift in shifts:
+                role,actual=expected>>shift&31,value>>shift&31
+                if role==31:
+                    matched=actual==31
+                elif (actual in {18,29,30,31} or roles.get(role,actual)!=actual or
+                      reverse.get(actual,role)!=role):
+                    matched=False
+                else:roles[role],reverse[actual]=actual,role
+                if not matched:break
+            if not matched:break
+        if not matched:continue
+        tls=by_pc.get(begin-4)
+        if (tls is None or struct.unpack('<I',tls.bytes)[0]!=(0xD53BD060|roles[tls_role]) or
+                kinds.get(begin-4,'missing')!=api.site_kind(tls)):continue
+        full_nodes={ins.address for ins in block}
+        first,second=call_indices;callee=block[first].operands[-1].imm
+        if callee!=block[second].operands[-1].imm or callee in full_nodes or callee+4 in full_nodes:continue
+        stub,ret=by_pc.get(callee),by_pc.get(callee+4)
+        if (stub is None or ret is None or struct.unpack('<I',stub.bytes)[0]!=0xD40006C1 or
+                struct.unpack('<I',ret.bytes)[0]!=0xD65F03C0 or
+                kinds.get(callee,'missing')!=api.site_kind(stub) or
+                kinds.get(callee+4,'missing') is not None):continue
+        nodes={ins.address for index,ins in enumerate(block) if index not in hole_indices}
+        if any(kinds.get(pc,'missing') is not None for pc in nodes):
+            raise api.RewriteError(f'0x{begin:x}: source rewrite in native try mutex')
+        for ins in block:
+            validate_memory_operands(ins,api)
+            if ins.mnemonic in api.EXCLUSIVE_LOADS|api.EXCLUSIVE_STORES:validate_exclusive(ins,api)
+        return nodes,begin,{begin+offset for offset in head_offsets}
+    return None
+
+
 def native_conditional_refresh(start, by_pc, kinds, api):
     """Return (all nodes, ordinary entry, reservation heads), or None.
 
@@ -620,17 +772,17 @@ def native_conditional_refresh(start, by_pc, kinds, api):
     """
     for variant, (words, fields) in enumerate(zip(NATIVE_CONDITIONAL_WORDS,
                                                 NATIVE_CONDITIONAL_FIELDS)):
-        begin = start.address - (0, 0, 20, 0, 20, 16, 4, 4, 4, 4, 20, 20, 0, 72, 28, 32, 32, 0, 0, 0, 8, 0, 0, 12, 0, 8, 8, 8, 8, 8, 0, 28)[variant]
+        begin = start.address - (0, 0, 20, 0, 20, 16, 4, 4, 4, 4, 20, 20, 0, 72, 28, 32, 32, 0, 0, 0, 8, 0, 0, 12, 0, 8, 8, 8, 8, 8, 0, 28, 8, 8, 8, 8, 8, 8, 8, 12)[variant]
         block = tuple(by_pc.get(begin + i*4) for i in range(len(words)))
         if begin < 0 or any(ins is None for ins in block):
             continue
-        external = ((6,), (5,), (2, 4), (4, 9), (3,), (3,), (), (), (), (7,), (4, 9), (4, 9), (15,), (), (), (2, 7, 15), (2, 15), (), (10, 16), (10,), (11, 15), (), (6, 10), (2, 14), (5, 9, 15), (12, 15), (12, 15), (12, 15), (12, 15), (12, 15), (), (5,))[variant]
+        external = ((6,), (5,), (2, 4), (4, 9), (3,), (3,), (), (), (), (7,), (4, 9), (4, 9), (15,), (), (), (2, 7, 15), (2, 15), (), (10, 16), (10,), (11, 15), (), (6, 10), (2, 14), (5, 9, 15), (12, 15), (12, 15), (12, 15), (12, 15), (12, 15), (), (5,), (14,), (14,), (14,), (14,), (14,), (14,), (14,), ())[variant]
         roles, reverse, matched = {}, {}, True
         for index, (ins, expected, shifts) in enumerate(zip(block, words, fields)):
             value = struct.unpack('<I', ins.bytes)[0]
             mask = sum(31 << shift for shift in shifts)
             if index in external:
-                bits = 14 if (variant,index) in ((15, 2), (16, 2), (18, 10), (19, 10), (20, 11), (22, 6), (22, 10), (24, 9), (25, 15), (26, 15), (27, 15), (28, 15), (29, 15)) else 19
+                bits = 14 if (variant,index) in ((15, 2), (16, 2), (18, 10), (19, 10), (20, 11), (22, 6), (22, 10), (24, 9), (25, 15), (26, 15), (27, 15), (28, 15), (29, 15), (32, 14), (33, 14), (34, 14), (35, 14), (36, 14), (37, 14), (38, 14)) else 19
                 mask |= 0x3FFFFFF if (variant,index) in ((3, 9), (9, 7), (10, 9), (11, 9), (12, 15), (15, 15), (16, 15), (18, 16), (20, 15), (23, 14), (24, 5), (24, 15), (25, 12), (26, 12), (27, 12), (28, 12), (29, 12)) else ((1 << bits) - 1) << 5
             if value & ~mask != expected & ~mask:
                 matched = False
@@ -664,8 +816,8 @@ def native_conditional_refresh(start, by_pc, kinds, api):
             validate_memory_operands(ins,api)
             if ins.mnemonic in api.EXCLUSIVE_LOADS | api.EXCLUSIVE_STORES:
                 validate_exclusive(ins,api)
-        entry = begin + (0, 0, 12, 0, 16, 4, 0, 0, 0, 0, 20, 20, 0, 4, 28, 32, 32, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 16)[variant]
-        heads = {begin+offset for offset in ((0, 28), (0, 28), (20,), (0, 20), (20,), (16,), (4,), (4,), (4,), (4,), (20,), (20,), (0,), (72, 144), (28,), (32,), (32,), (0,), (0,), (0,), (8,), (0,), (0,), (12,), (0,), (8,), (8,), (8,), (8,), (8,), (0,), (28,))[variant]}
+        entry = begin + (0, 0, 12, 0, 16, 4, 0, 0, 0, 0, 20, 20, 0, 4, 28, 32, 32, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0)[variant]
+        heads = {begin+offset for offset in ((0, 28), (0, 28), (20,), (0, 20), (20,), (16,), (4,), (4,), (4,), (4,), (20,), (20,), (0,), (72, 144), (28,), (32,), (32,), (0,), (0,), (0,), (8,), (0,), (0,), (12,), (0,), (8,), (8,), (8,), (8,), (8,), (0,), (28,), (8,), (8,), (8,), (8,), (8,), (8,), (8,), (12,))[variant]}
         return nodes,entry,heads
     return None
 
@@ -861,6 +1013,52 @@ def native_closed_call_tail(start, body, terminals, by_pc, kinds, api):
 
 
 
+def native_pointer_chain(start, by_pc, kinds, api):
+    """Four exact native heads retire before the tagged-chain call island.
+
+    Only the null-link path replaces the initial reservation with a fresh
+    same-cell acquire load. The original words remain native; secondary heads
+    are consumed internal heads, never independent entrances.
+    """
+    begin=start.address
+    block=tuple(by_pc.get(begin+offset) for offset in range(0,72,4))
+    if any(ins is None for ins in block):return None
+    values=tuple(struct.unpack('<I',ins.bytes)[0] for ins in block)
+    owner,cell,link,status,other=(values[0]&31,values[0]>>5&31,
+                                  values[2]&31,values[8]&31,values[13]>>5&31)
+    roles=(owner,cell,other,link,status)
+    if len(set(roles))!=5 or any(role in {18,29,30,31} for role in roles):return None
+    if block[1].mnemonic!='tbnz':return None
+    clear=block[1].operands[-1].imm
+    if clear-begin not in (0x60,0x68):return None
+    second,epilogue,success=clear+8,clear+0x1C,begin+0x48
+    tail=tuple(by_pc.get(clear+offset) for offset in range(0,28,4))
+    if any(ins is None for ins in tail):return None
+    if any(pc not in by_pc or api.is_fatal_instruction(by_pc[pc]) for pc in (epilogue,success)):return None
+    expected=(0xC85FFC00|cell<<5|owner,
+              0x37000000|(((clear-begin-4)//4)&0x3FFF)<<5|owner,
+              0xF9400000|owner<<5|link,0xB4000080|link,
+              0xC800FC00|status<<16|cell<<5|link,0x35FFFF60|status,
+              0x1400000C,0xB2400000|owner<<5|link,
+              0xC85FFC00|cell<<5|status,0xEB00001F|owner<<16|status<<5,
+              0x54000001|(((clear-begin-40)//4)&0x7FFFF)<<5,
+              0xC8007C00|status<<16|cell<<5|link,0x35FFFF80|status,
+              0xC85FFC00|other<<5|link,0xEB00001F|owner<<16|link<<5,
+              0x54000001|(((second-begin-60)//4)&0x7FFFF)<<5,
+              0xC8007C1F|link<<16|other<<5,0x35FFFF80|link)
+    ending=(0xD5033F5F,0x14000006,0xD5033F5F,0xC85F7C00|cell<<5|link,
+            0x927FF800|link<<5|link,0xC800FC00|status<<16|cell<<5|link,
+            0x35FFFFA0|status)
+    if values!=expected or tuple(struct.unpack('<I',ins.bytes)[0] for ins in tail)!=ending:return None
+    nodes={ins.address for ins in (*block,*tail)}
+    if any(kinds.get(pc,'missing') is not None for pc in nodes):
+        raise api.RewriteError(f'0x{begin:x}: source rewrite in native pointer chain')
+    for ins in (*block,*tail):
+        validate_memory_operands(ins,api)
+        if ins.mnemonic in api.EXCLUSIVE_LOADS|api.EXCLUSIVE_STORES:validate_exclusive(ins,api)
+    return nodes,begin,{begin,begin+32,begin+52,second+4}
+
+
 def native_shared_clear(start, by_pc, kinds, api):
     """Two source-exact fresh heads share one CLREX and acquire reload.
 
@@ -951,6 +1149,16 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfe
             require_native_wait_transfers(instructions,by_pc,kinds,entry_offsets,protected,producer,native_wait_transfers,api)
             occupied.update(protected);consumed.update(heads)
             continue
+        native_try=native_try_mutex(start,by_pc,kinds,api)
+        if native_try is not None:
+            nodes,entry,heads=native_try
+            producer=entry-4;protected=nodes|{producer}
+            if occupied&protected:
+                raise api.RewriteError(f'0x{producer:x}: overlapping exclusive windows')
+            require_single_entry(protected,producer,instructions,entry_offsets,api)
+            require_native_wait_transfers(instructions,by_pc,kinds,entry_offsets,protected,producer,native_wait_transfers,api)
+            occupied.update(protected);consumed.update(heads)
+            continue
         native_entry=native_compare_retry(start,by_pc,kinds,api)
         if native_entry is not None:
             nodes=set(range(native_entry,native_entry+56,4))
@@ -977,6 +1185,14 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfe
             for ins in instructions:
                 if ins.address not in nodes and any(target in nodes-heads for target in successors(ins)):
                     raise api.RewriteError(f'0x{ins.address:x}: external entry into exclusive region interior')
+            occupied.update(nodes);consumed.update(heads)
+            continue
+        chain=native_pointer_chain(start,by_pc,kinds,api)
+        if chain is not None:
+            nodes,entry,heads=chain
+            if occupied&nodes:
+                raise api.RewriteError(f'0x{entry:x}: overlapping exclusive windows')
+            require_single_entry(nodes,entry,instructions,entry_offsets,api)
             occupied.update(nodes);consumed.update(heads)
             continue
         conditional=native_conditional_refresh(start,by_pc,kinds,api)
