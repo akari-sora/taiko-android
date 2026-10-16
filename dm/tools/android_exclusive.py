@@ -606,26 +606,45 @@ NATIVE_WAIT_MUTEX_COMPACT_WORDS = (
 )
 NATIVE_WAIT_MUTEX_COMPACT_FIELDS = ((0, 5), (0, 5), (5,), (0, 5), (0,), (0,), (0, 5), (0, 5), (0,), (0, 5), (), (0, 5), (0, 5), (0,), (0, 5, 16), (0,), (0, 5), (0, 5), (0, 5), (0,), (), (0,), (), (), (0, 5), (0, 5), (0,), (0, 5), (0, 5), (0,), (), (), (0, 5, 16), (0,), (0, 5), (0, 5), (0,), (), ())
 
-# Two exact layouts share operand, TLR, callee and union validation. No
-# branch/order/width bits in the original 45-word row are generalized.
+# Exact original and sparse layouts share source validation. No
+# branch/order/width bits in the original 45/39-word rows are generalized.
+NATIVE_WAIT_MUTEX_SPARSE_WORDS = (
+    0x794202C8, 0xAA0103F4, 0xAA0003F3, 0x91006015,
+    0xF98002B0, 0x11000517, 0x34000948, 0x52800029,
+    0x790202D7, 0x885FFEAA, 0x350000CA, 0x1400000A,
+    0x790202C8, 0x790202D7, 0x885FFEAA, 0x340000CA,
+    0x790202C8, 0xD503205F, 0x790202D7, 0x885FFEAA,
+    0x35FFFF8A, 0x880A7EA9, 0x35FFFECA, 0x52800038,
+    0x14000002, 0xD503205F, 0x790202D7, 0x885FFEA8,
+    0x340000C8, 0x790202DF, 0x794206C8, 0x34FFFF48,
+    0x94016560, 0x17FFFFF8, 0x88087EB8, 0x34FFF768,
+    0x790202DF, 0x794206C8, 0x34FFFE88, 0x94016559,
+    0x17FFFFF2,
+)
+NATIVE_WAIT_MUTEX_SPARSE_FIELDS = ((0, 5), (0, 16), (0, 16), (0, 5), (5,), (0, 5), (0,), (0,), (0, 5), (0, 5), (0,), (), (0, 5), (0, 5), (0, 5), (0,), (0, 5), (), (0, 5), (0, 5), (0,), (0, 5, 16), (0,), (0,), (), (), (0, 5), (0, 5), (0,), (0, 5), (0, 5), (0,), (), (), (0, 5, 16), (0,), (0, 5), (0, 5), (0,), (), ())
+NATIVE_WAIT_MUTEX_SPARSE_OFFSETS = (0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 320, 324, 328, 332, 336, 340, 344, 348, 352, 356, 360, 364, 368, 372, 376, 380, 384, 388)
+
+# Exact source offsets permit the closed ordinary payload gap in the sparse
+# layout; its branches, TLR identity, cells, ordering and exits remain fixed.
 NATIVE_WAIT_MUTEX_LAYOUTS = (
-    (NATIVE_WAIT_MUTEX_WORDS,NATIVE_WAIT_MUTEX_FIELDS,(33,40),(28,48,72,92,112,168)),
-    (NATIVE_WAIT_MUTEX_COMPACT_WORDS,NATIVE_WAIT_MUTEX_COMPACT_FIELDS,(30,37),(28,48,72,100)),
+    (NATIVE_WAIT_MUTEX_WORDS,NATIVE_WAIT_MUTEX_FIELDS,(33,40),(28,48,72,92,112,168),28,19,tuple(range(0,180,4)),(180,)),
+    (NATIVE_WAIT_MUTEX_COMPACT_WORDS,NATIVE_WAIT_MUTEX_COMPACT_FIELDS,(30,37),(28,48,72,100),28,19,tuple(range(0,156,4)),(156,)),
+    (NATIVE_WAIT_MUTEX_SPARSE_WORDS,NATIVE_WAIT_MUTEX_SPARSE_FIELDS,(32,39),(36,56,76,336),36,22,NATIVE_WAIT_MUTEX_SPARSE_OFFSETS,(92,)),
 )
 
 
 def native_wait_mutex(start, by_pc, kinds, api):
-    """Recognize two finite native WFE schedules with exact void SVC36 source.
+    """Recognize exact native WFE schedules with exact void SVC36 source.
 
     Every call-return-to-store route executes a fresh LDAXR. TLS rewriting
     precedes the native union; the caller still enforces whole-union entry,
     overlap and head consumption. Actual WFE progress and dedicated void
     SVC36 require the separately verified owned-TLR/event-stream platform.
     """
-    begin=start.address-28
-    if begin<0:return None
-    for words,fields,call_indices,head_offsets in NATIVE_WAIT_MUTEX_LAYOUTS:
-        block=tuple(by_pc.get(begin+i*4) for i in range(len(words)))
+    for words,fields,call_indices,head_offsets,first_head,tls_role,offsets,exit_offsets in NATIVE_WAIT_MUTEX_LAYOUTS:
+        begin=start.address-first_head
+        if begin<0:continue
+        block=tuple(by_pc.get(begin+offset) for offset in offsets)
         if any(ins is None for ins in block):continue
         roles,reverse,matched={},{},True
         for index,(ins,expected,shifts) in enumerate(zip(block,words,fields)):
@@ -646,17 +665,22 @@ def native_wait_mutex(start, by_pc, kinds, api):
             if not matched:break
         if not matched:continue
         nodes={ins.address for ins in block};tls=by_pc.get(begin-4)
-        if (tls is None or struct.unpack('<I',tls.bytes)[0]!=(0xD53BD060|roles[19]) or
+        if (tls is None or struct.unpack('<I',tls.bytes)[0]!=(0xD53BD060|roles[tls_role]) or
                 kinds.get(begin-4,'missing')!=api.site_kind(tls)):continue
         first,second=call_indices;callee=block[first].operands[-1].imm
-        if callee!=block[second].operands[-1].imm or callee in nodes or callee+4 in nodes:continue
-        stub,ret,exit_ins=by_pc.get(callee),by_pc.get(callee+4),by_pc.get(begin+len(words)*4)
-        if (stub is None or ret is None or exit_ins is None or
+        if callee!=block[second].operands[-1].imm or begin<=callee<begin+offsets[-1]+4 or begin<=callee+4<begin+offsets[-1]+4:continue
+        stub,ret=by_pc.get(callee),by_pc.get(callee+4)
+        exits=[by_pc.get(begin+offset) for offset in exit_offsets]
+        if (stub is None or ret is None or any(ins is None for ins in exits) or
                 struct.unpack('<I',stub.bytes)[0]!=0xD40006C1 or
                 struct.unpack('<I',ret.bytes)[0]!=0xD65F03C0 or
-                api.is_fatal_instruction(exit_ins) or
+                any(api.is_fatal_instruction(ins) for ins in exits) or
                 kinds.get(callee,'missing')!=api.site_kind(stub) or
                 kinds.get(callee+4,'missing') is not None):continue
+        retirement=getattr(api,'SVC_MONITOR_RETIRE',None)
+        if (not isinstance(retirement,frozenset) or
+                any(type(number) is not int for number in retirement) or 0x36 not in retirement):
+            raise api.RewriteError(f'0x{callee:x}: native wait SVC36 lacks preframe retirement policy')
         if any(kinds.get(pc,'missing') is not None for pc in nodes):
             raise api.RewriteError(f'0x{begin:x}: source rewrite in native wait mutex')
         for ins in block:

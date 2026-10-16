@@ -26,6 +26,7 @@ from capstone.arm64_const import ARM64_OP_MEM, ARM64_OP_REG, ARM64_OP_IMM
 ABI = 0x444D4101
 STATE_HELPER, DISPATCH_HELPER = 1, 2
 SVC, TIMER, OBS, INDIRECT_HOST, STACK_CHECK = 1, 2, 3, 4, 5
+SVC_MONITOR_RETIRE = frozenset((0x1A, 0x36))  # ArbitrateLock can block; retire before host entry.
 EXCLUSIVE_LOADS = {'ldxr', 'ldaxr', 'ldxp', 'ldaxp', 'ldxrb', 'ldaxrb', 'ldxrh', 'ldaxrh'}
 EXCLUSIVE_STORES = {'stxr', 'stlxr', 'stxp', 'stlxp', 'stxrb', 'stlxrb', 'stxrh', 'stlxrh'}
 HELPER_POOL_CHUNK = 256 * 1024
@@ -3444,6 +3445,8 @@ class Emitter:
             self.data[at:at+4]=word(encoding|((delta//4)&0x7FFFF)<<5)
 
     def gate(self, ins, observation=None, *, indirect=False, stack_check=False):
+        if ins.mnemonic=='svc' and ins.operands[0].imm in SVC_MONITOR_RETIRE:
+            self.emit(0xD5033F5F)  # CLREX before any host stack or helper access.
         self.emit(0xD10043FF)  # sub sp,sp,#16
         self.emit(pair(False, 29, 30, 0))
         self.helper(30, DISPATCH_HELPER)
