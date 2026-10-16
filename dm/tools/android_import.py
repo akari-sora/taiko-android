@@ -21,7 +21,7 @@ from android_rewrite import (ABI, INDIRECT_HOST, FatalWord, RewriteError, rewrit
 from nso_format import NsoError, parse_nso, parse_metadata
 from android_profiles import resolve_profile
 from android_instruction import Instruction
-from taiko_sdk_contract import select_sdk_inline_layout
+from taiko_sdk_contract import select_sdk_inline_layout, select_sdk_profiler_layout
 from taiko_call_contract import select_checked_calls, select_checked_call_forest
 
 MAGIC = b'DMAMOD01'
@@ -165,16 +165,29 @@ def _sdk_profiler_bank(nso, metadata, roots):
     The proof selects every original word; SVC and SP writes still pass through
     the normal independent rewrite and checked-stack validation.
     """
-    if nso.source_sha256.hex() != '1c9f198a91c0bcfee5cf8f5b53fb941895e91334dfb766ce79fc68576797f017':
-        return None
-    start, end = 0x362698, 0x362E7C
+    if nso.source_sha256.hex() == '1c9f198a91c0bcfee5cf8f5b53fb941895e91334dfb766ce79fc68576797f017':
+        start, end = 0x362698, 0x362E7C
+        build_id = '2d369d9999e3e10e665106f840ffff9bdaa0bb8e000000000000000000000000'
+        body_sha256 = 'c613bdd0ed8165e4b8a84e8471e39ad7ef07f0ce8993146fa512191b92e548d1'
+        plt_start, got_start, hook_start = 0x582E70, 0xC71248, 0x3624A0
+        hook_names_sha256 = '75f455c16b08f779ba8c3281bf5d00d23c853fc45f2dbea50142361bd3a0c6c8'
+    else:
+        try:
+            layout = select_sdk_profiler_layout(nso)
+        except ValueError as error:
+            raise ImportError(str(error)) from error
+        if layout is None:
+            return None
+        start, end, build_id = layout.start, layout.end, layout.build_id
+        body_sha256, hook_names_sha256 = layout.body_sha256, layout.hook_names_sha256
+        plt_start, got_start, hook_start = layout.plt_start, layout.got_start, layout.hook_start
     def require(condition, message):
         if not condition:
             raise ImportError('SDK dormant profiler bank: ' + message)
-    require(nso.build_id.hex() == '2d369d9999e3e10e665106f840ffff9bdaa0bb8e000000000000000000000000', 'build identity changed')
+    require(nso.build_id.hex() == build_id, 'build identity changed')
     require(end <= nso.sections[0].end, 'range outside text')
     identity = hashlib.sha256(nso.image[start:end]).hexdigest()
-    require(identity == 'c613bdd0ed8165e4b8a84e8471e39ad7ef07f0ce8993146fa512191b92e548d1', 'body identity changed')
+    require(identity == body_sha256, 'body identity changed')
     marker = [s for s in metadata.symbols if s.name == '_ZN2nn8profiler12svcIntercept6EnableEv']
     require(len(marker) == 1 and (marker[0].value, marker[0].size, marker[0].binding, marker[0].kind, marker[0].section) ==
             (start - 4, 4, 1, 2, 2) and nso.image[start-4:start] == bytes.fromhex('c0035fd6'), 'typed Enable marker changed')
@@ -206,9 +219,9 @@ def _sdk_profiler_bank(nso, metadata, roots):
             pc = cursor + relative * 4
             actual = struct.unpack_from('<I', nso.image, pc)[0]
             if word is None:
-                plt = 0x582E70 + (2 * index + phase) * 16
+                plt = plt_start + (2 * index + phase) * 16
                 require(actual == 0x94000000 | (((plt - pc) // 4) & 0x3FFFFFF), 'wrapper PLT call changed')
-                got = 0xC71248 + (2 * index + phase) * 8
+                got = got_start + (2 * index + phase) * 8
                 plt_words = struct.unpack_from('<4I', nso.image, plt)
                 page_delta = ((got & ~4095) - (plt & ~4095)) // 4096
                 adrp = 0x90000010 | (page_delta & 3) << 29 | ((page_delta >> 2) & 0x7FFFF) << 5
@@ -221,7 +234,7 @@ def _sdk_profiler_bank(nso, metadata, roots):
                 hook = name + ('InterceptEnter' if phase == 0 else 'InterceptExit')
                 require(symbol.name.startswith('_ZN2nn8profiler' + str(len(hook)) + hook + 'E') and
                         (symbol.value, symbol.size, symbol.binding, symbol.kind, symbol.section) ==
-                        (0x3624A0 + (2 * index + phase) * 16, 4, 2, 2, 2) and
+                        (hook_start + (2 * index + phase) * 16, 4, 2, 2, 2) and
                         nso.image[symbol.value:symbol.value+4] == bytes.fromhex('c0035fd6'), 'typed profiler hook changed')
                 hook_names.append(symbol.name)
                 calls.append(pc)
@@ -238,7 +251,7 @@ def _sdk_profiler_bank(nso, metadata, roots):
         cursor += 4 * len(expected)
     require(cursor == end and len(svc_offsets) == 16 and len(calls) == 32, 'finite wrapper geometry changed')
     require(hashlib.sha256('\n'.join(hook_names).encode('utf-8')).hexdigest() ==
-            '75f455c16b08f779ba8c3281bf5d00d23c853fc45f2dbea50142361bd3a0c6c8', 'complete typed hook signatures changed')
+            hook_names_sha256, 'complete typed hook signatures changed')
     # The full source pin bounds this scan. Refuse new direct or materialized
     # entries rather than silently promoting the selected assembly to callbacks.
     def signed(value, bits):

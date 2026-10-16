@@ -1,8 +1,9 @@
-"""Select one source-pinned SDK inline-data layout, never execution authority.
+"""Select source-pinned SDK layouts, never execution authority.
 
 The importer must still prove every original LR/SP/control-flow path and reject
 all direct, address-materialized and independent interior entries. This selector
-only identifies where that existing complete proof may inspect literal data.
+only identifies bounded inline-data and dormant-assembly layouts for those
+complete proofs; entry, ABI and callback authority remain separate.
 """
 from dataclasses import dataclass
 import hashlib
@@ -75,3 +76,46 @@ def select_sdk_inline_layout(nso):
     if nso.source_sha256.hex() != SDK_SHA256 or nso.build_id.hex() != SDK_BUILD_ID:
         return None
     return _verify_layout(nso, _TAIKO_LAYOUT)
+
+
+@dataclass(frozen=True)
+class SdkProfilerLayout:
+    source_sha256: str
+    build_id: str
+    start: int
+    end: int
+    body_sha256: str
+    plt_start: int
+    got_start: int
+    hook_start: int
+    hook_names_sha256: str
+
+
+_TAIKO_PROFILER = SdkProfilerLayout(
+    source_sha256=SDK_SHA256, build_id=SDK_BUILD_ID,
+    start=0x3905E8, end=0x390DCC,
+    body_sha256='244b24f47e89fd0dc6f253406fbdfe3f2a2918cff4600a00c74e05b74c1faa6d',
+    plt_start=0x5CA680, got_start=0xCE0610, hook_start=0x3903F0,
+    hook_names_sha256='75f455c16b08f779ba8c3281bf5d00d23c853fc45f2dbea50142361bd3a0c6c8')
+
+
+def select_sdk_profiler_layout(nso):
+    """Identify one complete bank for analysis; all entry/ABI checks remain required."""
+    if nso.source_sha256.hex() != SDK_SHA256:
+        return None
+    layout = _TAIKO_PROFILER
+    def require(condition, reason):
+        if not condition:
+            raise ValueError('SDK dormant profiler bank: ' + reason)
+    require(nso.build_id.hex() == layout.build_id, 'build identity changed')
+    text, data = nso.sections[0], nso.sections[2]
+    require(text.offset <= layout.hook_start and layout.hook_start + 31 * 16 + 4 <= layout.start - 4 and
+            layout.start - 4 < layout.end <= text.end and layout.end <= len(nso.image) and
+            text.offset <= layout.plt_start and layout.plt_start + 32 * 16 <= text.end and
+            layout.plt_start + 32 * 16 <= len(nso.image) and
+            data.offset <= layout.got_start and layout.got_start + 32 * 8 <= data.end and
+            layout.got_start + 32 * 8 <= len(nso.image), 'compiled range outside original sections')
+    require(nso.image[layout.start - 4:layout.start] == bytes.fromhex('c0035fd6'), 'typed Enable marker changed')
+    require(hashlib.sha256(nso.image[layout.start:layout.end]).hexdigest() == layout.body_sha256,
+            'body identity changed')
+    return layout

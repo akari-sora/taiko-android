@@ -1195,7 +1195,75 @@ def _scheduled_side_load_table(ins, by_pc, entries, raw, readonly_ranges):
     return None
 
 
-def _virtual_loaded_x18_native_target(ins, by_pc, entries, raw, readonly_ranges):
+def _shared_table_compare(guard_pc, index, branch, by_pc, raw, root_entries, known_tables=()):
+    """One W-CMP reaches HI through bounded flag-neutral mode branches."""
+    if root_entries is None:
+        return None
+    def value(pc):
+        op=by_pc.get(pc)
+        return None if op is None else struct.unpack('<I',op.bytes)[0]
+    guard=by_pc.get(guard_pc);word_=value(guard_pc)
+    if (guard is None or word_ is None or word_&0xFF00001F!=0x54000008 or
+            guard_pc<guard.operands[-1].imm<=branch):
+        return None
+    begin=max(0,guard_pc-512)
+    predecessors={pc:set() for pc in range(begin,guard_pc+4,4) if pc in by_pc}
+    for pc in predecessors:
+        if pc==guard_pc:continue
+        op=by_pc[pc]
+        if is_fatal_instruction(op) or op.group(CS_GRP_RET) or op.mnemonic=='br':
+            successors=()
+        elif op.mnemonic=='b':
+            successors=(op.operands[-1].imm,)
+        elif op.mnemonic in ('cbz','cbnz','tbz','tbnz') or op.mnemonic.startswith('b.'):
+            successors=(op.operands[-1].imm,pc+4)
+        else:
+            successors=(pc+4,)
+        for destination in successors:
+            if destination in predecessors:predecessors[destination].add(pc)
+    pending=[guard_pc];seen=set();compares=set();bit_bridge=False
+    while pending:
+        pc=pending.pop()
+        if pc in seen:continue
+        seen.add(pc);op=by_pc[pc];word_=value(pc)
+        if len(seen)>16:return None
+        if word_&0xFFC003FF==0x7100001F|(index<<5) and word_>>10&4095<=63:
+            compares.add(pc);continue
+        if pc in root_entries:return None
+        if pc!=guard_pc:
+            bit_test=op.mnemonic in ('tbz','tbnz') and not word_>>31
+            if (op.mnemonic not in ('cbz','cbnz') and not bit_test or
+                    word_&31 in (18,29,30,31) or op.operands[-1].imm<=pc):
+                return None
+            bit_bridge|=bit_test
+        previous=predecessors[pc]
+        if not previous:return None
+        pending.extend(previous-seen)
+    if len(compares)!=1:return None
+    compare=next(iter(compares))
+    protected=(seen-compares)|set(range(guard_pc,branch+4,4))
+    if protected.intersection(root_entries):return None
+    for op in by_pc.values():
+        if op.mnemonic in ('b','bl','cbz','cbnz','tbz','tbnz') or op.mnemonic.startswith('b.'):
+            if op.operands[-1].imm in protected and op.address not in seen:return None
+        elif op.mnemonic in ('adr','adrp'):
+            destination=op.operands[1].imm
+            if destination in protected:return None
+            following=value(op.address+4);register=value(op.address)&31
+            if (op.mnemonic=='adrp' and following is not None and
+                    following&0xFFC003FF==0x91000000|(register<<5)|register and
+                    destination+(following>>10&4095) in protected):
+                return None
+    for collection in known_tables:
+        for plan in collection.values():
+            destinations={plan['base']+tag*4 for tag in plan.get('target_values',range(plan.get('count',0)))}
+            if protected.intersection(destinations):return None
+    return compare,value(compare)>>10&4095,dict(
+        bound_candidate_kind='tb-shared-cmp' if bit_bridge else 'cbz-shared-cmp',
+        shared_guard_offset=guard_pc,shared_compare_path_offsets=sorted(seen))
+
+
+def _virtual_loaded_x18_native_target(ins, by_pc, entries, raw, readonly_ranges, *, root_entries=None, known_tables=()):
     """The observed RO switch loads guest X18, then consumes it in ADD."""
     def value(pc):
         op=by_pc.get(pc)
@@ -1203,11 +1271,13 @@ def _virtual_loaded_x18_native_target(ins, by_pc, entries, raw, readonly_ranges)
     branch=value(ins.address);target=branch>>5&31
     if branch&0xFFFFFC1F!=0xD61F0000 or target in (18,29,30,31):
         return None
-    addition=ins.address-4;suffix=[]
+    addition=ins.address-4;suffix=[];neutral_u16_mov=False
     expected_add=0x8B120800|(target<<5)|target
     if value(addition)!=expected_add:
         mask=value(addition);reg=0 if mask is None else mask&31
-        if mask!=0x12001C00|(reg<<5)|reg or reg in (target,18,29,30,31):
+        neutral_u16_mov=(mask is not None and mask&~(0xFFFF<<5)==0x52800000|reg)
+        if (not neutral_u16_mov and mask!=0x12001C00|(reg<<5)|reg or
+                reg in (target,18,29,30,31)):
             return None
         suffix=[addition];addition-=4
     load=addition-4;word_=value(load)
@@ -1217,28 +1287,49 @@ def _virtual_loaded_x18_native_target(ins, by_pc, entries, raw, readonly_ranges)
     table_register,index=word_>>5&31,word_>>16&31
     if (len({target,table_register,index})!=3 or any(r in (18,29,30,31) for r in (table_register,index)) or
             word_!=(0x78607812 if width==2 else 0x38606812)|(index<<16)|(table_register<<5) or
-            suffix and (width!=1 or reg in (table_register,index))):
+            suffix and (width!=(2 if neutral_u16_mov else 1) or reg in (table_register,index))):
         return None
+    if neutral_u16_mov:
+        suffix_page=by_pc.get(load-12);suffix_add=value(load-8)
+        # This ordinary MOVZ suffix is approved only for the complete inline
+        # u16 page/ADD/ADR/read core. It does not widen old byte/hoisted suffixes.
+        if (suffix_page is None or suffix_page.mnemonic!='adrp' or value(load-12)&31!=table_register or
+                suffix_add is None or suffix_add&0xFFC003FF!=0x91000000|(table_register<<5)|table_register):
+            return None
     page_op=by_pc.get(load-12);inline_add=value(load-8)
-    inline=(width==2 and page_op is not None and page_op.mnemonic=='adrp' and
+    inline=(page_op is not None and page_op.mnemonic=='adrp' and
             value(load-12)&31==table_register and inline_add is not None and
             inline_add&0xFFC003FF==0x91000000|(table_register<<5)|table_register)
-    compare,guard,address=(by_pc.get(load-distance) for distance in ((20,16,4) if inline else (12,8,4)))
+    copy_word=value(load-16);copy_source=0 if copy_word is None else copy_word>>16&31
+    inline_copy=(inline and width==1 and copy_word is not None and
+                 copy_word==0x2A0003E0|(copy_source<<16)|index and
+                 copy_source not in (target,table_register,index,18,29,30,31))
+    distances=(24,20,4) if inline_copy else (20,16,4) if inline else (12,8,4)
+    compare,guard,address=(by_pc.get(load-distance) for distance in distances)
+    compare_register=copy_source if inline_copy else index
+    shared=None
+    if (inline and not inline_copy and (compare is None or
+            value(compare.address)&0x7FC003FF!=0x7100001F|(index<<5))):
+        shared=_shared_table_compare(load-16,index,ins.address,by_pc,raw,root_entries,known_tables)
+        if shared is not None:compare=by_pc[shared[0]]
     if (any(op is None for op in (compare,guard,address)) or
             # Only the W/X width bit may differ. The live load guard still
             # checks all 64 index bits, including entries after this compare.
-            value(compare.address)&0x7FC003FF!=0x7100001F|(index<<5) or
+            value(compare.address)&(0xFFC003FF if inline_copy else 0x7FC003FF)!=0x7100001F|(compare_register<<5) or
             value(guard.address)&0xFF00001F!=0x54000008 or guard.address<guard.operands[0].imm<=ins.address or
             address.mnemonic!='adr' or value(address.address)&31!=target):
         return None
     base=address.operands[1].imm;bound=value(compare.address)>>10&4095
     preload={address.address,load}
     if inline:
-        if base!=ins.address+4:
+        if base!=ins.address+4 and not (shared is not None and compare.address<base<guard.address):
             return None
         preload.update((load-12,load-8))
-    if (base%4 or base not in by_pc or not (base<compare.address or base==ins.address+4) or bound>63 or
-            any(pc in entries and pc not in preload for pc in range(compare.address+4,ins.address+4,4))):
+    if inline_copy:preload.add(load-16)
+    if shared is not None:preload.add(guard.address)
+    if (base%4 or base not in by_pc or not (base<compare.address or base==ins.address+4 or
+            shared is not None and compare.address<base<guard.address) or bound>(255 if inline_copy else 63) or
+            any(pc in entries and pc not in preload for pc in range(guard.address if shared is not None else compare.address+4,ins.address+4,4))):
         return None
     candidates=[]
     # The complete inline page/ADD/ADR source owns this table candidate.
@@ -1274,12 +1365,18 @@ def _virtual_loaded_x18_native_target(ins, by_pc, entries, raw, readonly_ranges)
     values=sorted(set(struct.unpack('<'+str(bound+1)+('H' if width==2 else 'B'),data)))
     if values[-1]>4095:
         return None
+    if shared is not None:
+        protected=(set(shared[2]['shared_compare_path_offsets'])-{compare.address})|set(range(guard.address,ins.address+4,4))
+        if any(base+tag*4 in protected for tag in values):return None
     return dict(offset=ins.address,base=base,target_register=target,load_offset=load,
                 table_register=table_register,index_register=index,loaded_register=18,virtual_loaded_register=18,
                 index_bound=bound,table_offset=table,table_bytes=size,table_sha256=hashlib.sha256(data).hexdigest(),
                 target_values=values,compare_offset=compare.address,guard_offset=guard.address,
-                proof_start_offset=compare.address,producer_offsets=[page,add,address.address,load,addition],
+                proof_start_offset=load-4 if shared is not None else compare.address,producer_offsets=[page,add,address.address,load,addition],
                 permitted_source_rewrite_offsets=[load,addition],guarded_preload_entry_offsets=sorted(preload),
+                **(shared[2] if shared is not None else {}),
+                **(dict(bound_candidate_kind='virtual-loaded-inline-wcopy',index_copy_offset=load-16,
+                        index_copy_source_register=copy_source) if inline_copy else {}),
                 **({'preserved_source_offsets':suffix} if suffix else {}),
                 **({'reaching_table_producer_offsets':reaching} if reaching else {}),
                 equivalent_table_producer_offsets=[row[0] for row in candidates],
@@ -1864,6 +1961,32 @@ def _reaching_table_candidates(load, register, current_branch, by_pc, candidates
     return sorted(set(reaching))
 
 
+def _native_u16_boolean_index(load, target, loaded, table, index, by_pc):
+    """Four disjoint one-bit W fields provide a finite 0..15 candidate.
+
+    Exact W encodings establish zero-extension and keep the original CMP/
+    CSET ordering, GPR and SP-read effects. This supplies no dominance or
+    entry authority; the original load still checks its actual full64 index.
+    """
+    pcs=list(range(load-64,load-12,4));ops=[by_pc.get(pc) for pc in pcs]
+    if any(op is None for op in ops):
+        return None
+    words=[struct.unpack('<I',op.bytes)[0] for op in ops]
+    shifted,source,second,temporary=words[0]&31,words[0]>>5&31,words[2]>>10&31,words[4]&31
+    registers_=(shifted,source,second,temporary)
+    if len(set(registers_))!=4 or any(r in (target,loaded,table,index,18,29,30,31) for r in registers_):
+        return None
+    expected=[0x531E7400|(source<<5)|shifted,0x121D0000|(shifted<<5)|index,
+              0x294703E0|(second<<10)|shifted,0x7100001F|(shifted<<5),0x1A9FD7E0|temporary,
+              0x7100001F|(second<<5),0x331E0000|(temporary<<5)|index,0x1A9FD7E0|temporary,
+              0x331F0000|(temporary<<5)|index,0xB94043E0|temporary,
+              0x7100001F|(temporary<<5),0x1A9FD7E0|table,0x2A000000|(table<<16)|(index<<5)|index]
+    if words!=expected:
+        return None
+    return dict(bound_candidate_kind='u16-boolean-composition',bound_transform_offset=load-16,
+                boolean_source_offsets=pcs,boolean_native_sources=list(registers_),boolean_field_bits=[3,2,1,0])
+
+
 def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *, virtual_table=False, virtual_loaded=False, known_tables=(), root_entries=None):
     """Normalize native dispatch around the actual checked read, not its prefix.
 
@@ -1930,12 +2053,28 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
             # A virtual table page may have up to six selected ordinary setup
             # instructions before its ADD. This supplies a candidate only;
             # the actual virtual table still has to match at the guarded read.
+            frame_pair_seen=False
             for add_pc in range(pc+4,min(pc+(32 if virtual_table else 8),load-4),4):
                 add_word=value(add_pc)
                 if add_word is not None and add_word&0xFFC003FF==0x91000000|(table_register<<5)|table_register:
+                    if frame_pair_seen and any(at in entries or at in (root_entries or ()) for at in range(pc+4,add_pc+4,4)):
+                        break  # A frame-store constructor cannot acquire an interior entry.
                     tables.append((pc,add_pc,op.operands[1].imm+(add_word>>10&4095)))
                     break
                 side=by_pc.get(add_pc)
+                frame_pair=(virtual_table and width==1 and side is not None and side.mnemonic=='stp' and
+                            not side.writeback and not side.update_flags and not side.regs_access()[1] and
+                            add_word&~((31<<10)|31)==0xA93F03A0 and
+                            len({add_word&31,add_word>>10&31})==2 and
+                            all(r<29 and r!=18 for r in (add_word&31,add_word>>10&31)))
+                if frame_pair:
+                    # One exact STP Xr,Xs,[FP,#-16], without writeback. It reads
+                    # ordinary GPRs/FP, writes only the original frame payload,
+                    # and cannot change the table/index/flags. Keep its word in place.
+                    if frame_pair_seen:
+                        break
+                    frame_pair_seen=True
+                    continue
                 if (not virtual_table or side is None or side.mnemonic not in ('mov','movz','movn','add') or
                         side.update_flags or any(side.reg_name(r) in
                         ('x18','w18','sp','wsp','fp','lr','x29','w29','x30','w30','nzcv')
@@ -1948,6 +2087,14 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
         if pc<load-128 or word_ is None:
             continue
         source=word_>>5&31;lsb=word_>>16&63;last=word_>>10&63
+        if (virtual_table and width==1 and addition==branch-4 and pc==load-8 and base<pc and
+                source not in (18,29,30,31) and word_==0x92400400|(source<<5)|index):
+            # Exact AND Xindex,Xsource,#3 immediately before the backward ADR.
+            # This supplies four immutable table rows, not a dominance claim:
+            # ADR/LDR entrances still check actual virtual table/base/full64 index.
+            bounds.append((pc,3))
+            bound_details[pc]=dict(bound_candidate_kind='full64-low2-mask',bound_transform_offset=pc,
+                                   bound_source_register=source,bound_mask=3)
         if (source not in (18,29,30,31) and 0<=lsb<=last<32 and last-lsb<6 and
                 word_==0x53000000|(lsb<<16)|(last<<10)|(source<<5)|index):
             bounds.append((pc,(1<<(last-lsb+1))-1))
@@ -1981,6 +2128,11 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
                     bounds.append((compare_pc,compared>>10&4095))
                     bound_details.setdefault(compare_pc,dict(bound_candidate_kind='wcopy-cmp',
                         bound_transform_offset=pc,bound_source_register=alias))
+    if (not (virtual_table or virtual_loaded) and width==2 and addition==branch-4 and base==branch+4 and
+            any(row[:2]==(load-12,load-8) for row in tables)):
+        boolean=_native_u16_boolean_index(load,target,loaded,table_register,index,by_pc)
+        if boolean is not None:
+            bounds.append((load-16,15));bound_details[load-16]=boolean
     if bounds:
         definitions=[]
         for pc in range(max(0,load-128),load,4):
@@ -2000,72 +2152,12 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
         bounds=[row for row in bounds if not any(anchor(row)<pc<load for pc in wide_definitions) and
                 not any(anchor(row)<anchor(later) and any(anchor(row)<pc<=anchor(later) for pc in definitions)
                         for later in bounds)]
-    if (not bounds and not (virtual_table or virtual_loaded) and root_entries is not None and
+    if (not bounds and not (virtual_table or virtual_loaded) and
             any(row[:2]==(load-12,load-8) for row in tables)):
-        # A shared CMP may reach this HI guard through a finite CBZ mode
-        # selection graph. Prove every predecessor preserves index and NZCV;
-        # numerical proximity alone never supplies the missing candidate.
-        guard_pc=load-16;shared_guard=by_pc.get(guard_pc);guard_word=value(guard_pc)
-        if (shared_guard is not None and guard_word is not None and
-                guard_word&0xFF00001F==0x54000008 and
-                not guard_pc<shared_guard.operands[-1].imm<=branch):
-            begin=max(0,guard_pc-512)
-            predecessors={pc:set() for pc in range(begin,guard_pc+4,4) if pc in by_pc}
-            for pc in predecessors:
-                if pc==guard_pc:continue
-                op=by_pc[pc]
-                if is_fatal_instruction(op) or op.group(CS_GRP_RET) or op.mnemonic=='br':
-                    successors=()
-                elif op.mnemonic=='b':
-                    successors=(op.operands[-1].imm,)
-                elif op.mnemonic in ('cbz','cbnz','tbz','tbnz') or op.mnemonic.startswith('b.'):
-                    successors=(op.operands[-1].imm,pc+4)
-                else:
-                    successors=(pc+4,)
-                for destination in successors:
-                    if destination in predecessors:predecessors[destination].add(pc)
-            pending=[guard_pc];seen=set();compares=set();valid=True
-            while pending:
-                pc=pending.pop()
-                if pc in seen:continue
-                seen.add(pc);op=by_pc[pc];word_=value(pc)
-                if len(seen)>16:
-                    valid=False;break
-                if word_&0xFFC003FF==0x7100001F|(index<<5) and word_>>10&4095<=63:
-                    compares.add(pc);continue
-                if (pc in root_entries or pc!=guard_pc and
-                        (op.mnemonic not in ('cbz','cbnz') or word_&31 in (18,29,30,31) or
-                         op.operands[-1].imm<=pc)):
-                    valid=False;break
-                previous=predecessors[pc]
-                if not previous:
-                    valid=False;break
-                pending.extend(previous-seen)
-            if valid and len(compares)==1:
-                shared_compare=next(iter(compares))
-                protected=(seen-compares)|set(range(guard_pc,branch+4,4))
-                valid=not protected.intersection(root_entries)
-                for op in by_pc.values():
-                    if not valid:break
-                    if op.mnemonic in ('b','bl','cbz','cbnz','tbz','tbnz') or op.mnemonic.startswith('b.'):
-                        if op.operands[-1].imm in protected and op.address not in seen:
-                            valid=False
-                    elif op.mnemonic in ('adr','adrp'):
-                        destination=op.operands[1].imm
-                        if destination in protected:valid=False
-                        following=value(op.address+4);register=value(op.address)&31
-                        if (op.mnemonic=='adrp' and following is not None and
-                                following&0xFFC003FF==0x91000000|(register<<5)|register and
-                                destination+(following>>10&4095) in protected):
-                            valid=False
-                for collection in known_tables:
-                    for plan in collection.values():
-                        destinations={plan['base']+tag*4 for tag in plan.get('target_values',range(plan.get('count',0)))}
-                        if protected.intersection(destinations):valid=False
-                if valid:
-                    bounds.append((shared_compare,value(shared_compare)>>10&4095))
-                    bound_details[shared_compare]=dict(bound_candidate_kind='cbz-shared-cmp',
-                        shared_guard_offset=guard_pc,shared_compare_path_offsets=sorted(seen))
+        shared=_shared_table_compare(load-16,index,branch,by_pc,raw,root_entries,known_tables)
+        if shared is not None:
+            compare,bound,details=shared
+            bounds.append((compare,bound));bound_details[compare]=details
     if not bounds:
         return None
     compare,bound=bounds[-1]
@@ -2097,13 +2189,63 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
                             'x18','w18','sp','wsp','fp','lr','x29','w29','x30','w30','nzcv') for r in side.regs_access()[1])):
                     break
         wide_setup=bool(tables) and wide_compare
-    canonical_copy=(not (virtual_table or virtual_loaded) and width==2 and addition==branch-4 and compare==load-24 and
+    # Only these exact native-u8 cores admit the full finite byte domain.
+    # Other/virtual/hoisted/scheduled families retain their existing limits.
+    # Adjacent index transforms belong to their existing bounded families.
+    # The wider plain-byte form consumes an incoming index, not SUB/UBFX/etc.
+    # Normalize W/X aliases; Capstone's CMP alias write reports are not writes.
+    prior_index=by_pc.get(compare-4)
+    prior_index_write=(prior_index is not None and not is_fatal_instruction(prior_index) and
+                       prior_index.mnemonic not in ('cmp','cmn','tst','ccmp','ccmn') and
+                       ('x'+str(index) in {prior_index.reg_name(r).replace('w','x',1)
+                           for r in prior_index.regs_access()[1]} or
+                        prior_index.update_flags and prior_index.operands and
+                        prior_index.operands[0].type==ARM64_OP_REG and
+                        prior_index.reg_name(prior_index.operands[0].reg).replace('w','x',1)=='x'+str(index)))
+    native_byte_inline=(not (virtual_table or virtual_loaded) and width==1 and not prior_index_write and
+                        addition==branch-4 and compare==load-20 and not bound_details[compare] and
+                        value(compare)&0xFFC003FF==0x7100001F|(index<<5) and
+                        guard is not None and value(compare+4)&0xFF00001F==0x54000008 and
+                        not compare+4<guard.operands[0].imm<=branch and
+                        any(row[:2]==(load-12,load-8) for row in tables))
+    canonical_copy=(not (virtual_table or virtual_loaded) and width in (1,2) and addition==branch-4 and compare==load-24 and
+                    (width==2 or value(compare)&0xFFC003FF==0x7100001F|(bound_details[compare].get('bound_source_register',31)<<5)) and
                     bound_details[compare].get('bound_candidate_kind')=='wcopy-cmp' and
                     bound_details[compare].get('bound_transform_offset')==load-16 and
                     guard is not None and value(compare+4)&0xFF00001F==0x54000008 and
                     not compare+4<guard.operands[0].imm<=branch and
                     any(row[:2]==(load-12,load-8) for row in tables))
-    if len({row[1] for row in bounds})!=1 or bound>(255 if canonical_copy or wide_setup else 63):
+    native_sp_store_u16=False
+    if (not (virtual_table or virtual_loaded) and width==2 and not bound_details[compare] and
+            compare==load-44 and addition==branch-20 and base==branch+4 and
+            value(compare)&0xFFC003FF==0x7100001F|(index<<5) and
+            any(row[:2]==(load-16,load-12) for row in tables)):
+        offsets=(-52,-48,-40,-36,-32,-28,-24,-20,-8,8,12,16,20)
+        schedule=[value(load+d) for d in offsets]
+        if all(word_ is not None for word_ in schedule):
+            read,sub,pair_store,word_store,byte_store,hi,first,second,pointer_store,zero0,zero1,mov_index,mov_loaded=schedule
+            source=sub>>5&31;pointer=second>>5&31;offset=first>>5&31;temporary=first&31
+            zero=zero0&31;last_source=mov_loaded>>16&31
+            ordinary=(source,pointer,offset,temporary,zero,last_source,pair_store&31,pair_store>>10&31,word_store&31)
+            native_sp_store_u16=(all(r not in (18,29,30,31) for r in ordinary) and
+                all(r not in roles for r in (source,pointer,offset,temporary,zero,last_source)) and
+                temporary not in (source,pointer,offset) and zero!=source and
+                read==0x38606800|(offset<<16)|(pointer<<5)|source and
+                sub&0xFFC003FF==0x51000000|(source<<5)|index and
+                pair_store&~((31<<10)|31)==0x290303E0 and
+                word_store&~31==0xB90023E0 and byte_store==0x390093E0|source and
+                hi&0xFF00001F==0x54000008 and not load-28<by_pc[load-28].operands[-1].imm<=branch and
+                first==0x91000400|(offset<<5)|temporary and
+                second==0x8B000000|(temporary<<16)|(pointer<<5)|loaded and
+                pointer_store==0xF9000BE0|loaded and
+                zero0==0x2A1F03E0|zero and zero1==0x2A1F03E0|source and
+                mov_index&~(0xFFFF<<5)==0x52800000|index and
+                mov_loaded==0x2A0003E0|(last_source<<16)|loaded)
+        # Every store is an exact non-writeback SP form. They leave CMP's
+        # flags/index intact; setup ADDs touch only independent temporaries.
+        # The four suffix MOVs retain all effects after the target ADD, and
+        # every entrance still passes the existing actual full64 read guard.
+    if len({row[1] for row in bounds})!=1 or bound>(255 if canonical_copy or wide_setup or native_byte_inline or native_sp_store_u16 else 63):
         return None
     if addition==branch-28 and bound_details[compare].get('bound_candidate_kind')!='masked-extraction':
         return None
@@ -2112,6 +2254,8 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
     # objects; they do not change this core. Entrances at ADR/LDR still check
     # the live table, so this does not borrow constructor dominance.
     inline=[row for row in tables if row[:2]==(load-12,load-8)]
+    if native_sp_store_u16:
+        inline += [row for row in tables if row[:2]==(load-16,load-12)]
     local_add=value(load-8)
     if (not (virtual_table or virtual_loaded) and not bound_details[compare] and
             guard is not None and value(compare+4)&0xFF00001F==0x54000008 and
@@ -2171,7 +2315,10 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
     if len(data)!=size:
         return None
     values=sorted(set(struct.unpack('<'+str(bound+1)+('B' if width==1 else 'H'),data)))
-    if values[-1]>4095:
+    # Native u16 BR keeps a sparse finite set; its veneer does not scale with
+    # the largest tag. Every derived case still needs original code-domain
+    # audit. Virtual-table/loaded families retain their existing ceilings.
+    if values[-1]>4095 and (width!=2 or virtual_table or virtual_loaded):
         return None
     return dict(offset=branch,base=base,target_register=target,load_offset=load,
                 table_register=table_register,index_register=index,loaded_register=loaded,
@@ -2182,6 +2329,8 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
                 **({'reaching_table_producer_offsets':reaching} if reaching else {}),
                 preserved_source_offsets=list(range(addition+4,branch,4)),
                 entry_policy='all-paths-must-pass-actual-native-read-guard-v1',
+                **(dict(bound_candidate_kind='scheduled-u16-sp-stores',scheduled_guard_offset=load-28,
+                        preserved_sp_store_offsets=[compare+4,compare+8,compare+12,load-8]) if native_sp_store_u16 else {}),
                 rule=('runtime-virtual-table-x18-guarded-readonly-lsl2-v1' if virtual_table else
                       'runtime-virtual-loaded-x18-guarded-readonly-lsl2-v1' if virtual_loaded else
                       'runtime-native-guarded-readonly-lsl2-v1'),**bound_details[compare],
@@ -2198,7 +2347,7 @@ def readonly_guest_table(ins, by_pc, entries, raw, readonly_ranges, *, known_tab
             _scheduled_side_load_table(ins,by_pc,entries,raw,readonly_ranges) or
             virtual_index_x18_native_target(ins,by_pc,entries,raw,readonly_ranges,root_entries=root_entries) or
             _virtual_table_x18_native_target(ins,by_pc,entries,raw,readonly_ranges) or
-            _virtual_loaded_x18_native_target(ins,by_pc,entries,raw,readonly_ranges) or
+            _virtual_loaded_x18_native_target(ins,by_pc,entries,raw,readonly_ranges,root_entries=root_entries,known_tables=known_tables) or
             _scheduled_native_readonly_table(ins,by_pc,entries,raw,readonly_ranges) or
             _assembled_byte_readonly_table(ins,by_pc,entries,raw,readonly_ranges) or
             _guarded_native_readonly_table(ins,by_pc,entries,raw,readonly_ranges,known_tables=known_tables,root_entries=root_entries) or
