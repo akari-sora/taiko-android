@@ -10,7 +10,12 @@ struct ComputeSourceCatalog {
     uint64_t generation=0;
     std::array<ShaderSourceStage,4> sources{};
 };
-const std::array<ShaderIndexEntry,4>& compiled_compute_catalog();
+#if defined(DM_TARGET_TAIKO) && DM_TARGET_TAIKO
+constexpr size_t kCompiledOriginalComputeCount=0;
+#else
+constexpr size_t kCompiledOriginalComputeCount=4;
+#endif
+const std::array<ShaderIndexEntry,kCompiledOriginalComputeCount>& compiled_compute_catalog();
 bool create_compute_source_catalog(const Process&,ComputeSourceCatalog*,std::string*);
 bool resolve_catalog_compute(const ComputeSourceCatalog&,uint64_t generation,uint64_t serial,
     const NVNshaderData*,size_t,ShaderSourceReader,void*,

@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "program_id": "01002460135A4000",
+  "title": "太鼓之達人 咚咚雷音祭",
+  "selected_exefs_display_version": null,
+  "guest_modules": [
+    "main",
+    "subsdk0",
+    "sdk"
+  ],
+  "npdm_sha256": "afd3aade95cbcc607759eb677b67082193719a701a5b0cc8ed78ac33b5c65150",
+  "sources": {
+    "rtld": {
+      "file_bytes": 7132,
+      "sha256": "8e08c8cf2e4d6b39d69643af10ce765d39c06860878224c68f8cafc45a2636aa",
+      "build_id": "567cdd4c5251494c5cd70822e3ccc740c190c2b2000000000000000000000000"
+    },
+    "main": {
+      "file_bytes": 38127530,
+      "sha256": "f1313fe0d6cd4a024e53d8a283434448bacea453b02f37b75b18bfe281d0fcff",
+      "build_id": "4541b79257635ce79105b3ba59e4808500000000000000000000000000000000"
+    },
+    "subsdk0": {
+      "file_bytes": 3385425,
+      "sha256": "f38d30e8241ee208cbf3090f44613e328af517ad199eb5985619416bb2cbcb55",
+      "build_id": "a8cb97803f7f442a3b6cce1c7cd4ee4a78b7def3000000000000000000000000"
+    },
+    "sdk": {
+      "file_bytes": 5989236,
+      "sha256": "2a89fa1c0e677710e89ed29b578162affef530a0c9b8c93cda15d50a57a20d28",
+      "build_id": "357efc198e728cb5d55265aff304f03cfc9cc0e3000000000000000000000000"
+    }
+  },
+  "original_execution": "NOT_RUN",
+  "first_original_frame": "NOT_OBSERVED"
+}

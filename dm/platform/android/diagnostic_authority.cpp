@@ -2,7 +2,9 @@
 #include "module_fixtures/generated_modules.h"
 #include "observation_fixtures/generated_observations.h"
 #include "controller_fixtures/generated_controllers.h"
+#if !defined(DM_TARGET_TAIKO) || !DM_TARGET_TAIKO
 #include "graphics_fixtures/generated_graphics.h"
+#endif
 #include <cstring>
 #include <initializer_list>
 
@@ -66,10 +68,15 @@ bool controller_diagnostic_graph(const Process& process,std::string* error) {
     return fail(error,"controller diagnostic graph identity mismatch");
 }
 bool graphics_diagnostic_graph(const Process& process,std::string* error) {
+#if defined(DM_TARGET_TAIKO) && DM_TARGET_TAIKO
+    (void)process;
+    return fail(error,"legacy graphics diagnostic carrier unavailable for Taiko: contains D2R original compute records");
+#else
     if(error) error->clear();
     if(graph(process,{{dm_observation_main_bytes,dm_observation_main_size,dm_observation_main_package_sha256},
                       {dm_graphics_bytes,dm_graphics_size,dm_graphics_package_sha256}})) return true;
     return fail(error,"graphics diagnostic graph identity mismatch");
+#endif
 }
 bool DiagnosticAuthority::bind(const Process& process,const BootstrapSession* session,std::string* error) {
     if(error) error->clear();

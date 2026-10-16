@@ -12,6 +12,9 @@ bool digest_is(const ShaderDigest& d,const char* hex) {
     return true;
 }
 int original_policy(const ResolvedProgram& p) {
+#if defined(DM_TARGET_TAIKO) && DM_TARGET_TAIKO
+    (void)p;return -1;
+#else
     if(p.stage_mask()!=32||p.stages().size()!=1)return -1;
     const auto& a=*p.stages()[0];const auto& k=a.key();
     const auto* key=std::get_if<OriginalMaxwellKey>(&k.source);
@@ -27,6 +30,7 @@ int original_policy(const ResolvedProgram& p) {
     ShaderDigest module{};module_sha256(reinterpret_cast<const uint8_t*>(a.words().data()),a.words().size()*4,module.data());
     for(int i=0;i<4;++i)if(digest_is(key->control_sha256,pins[i][0])&&digest_is(key->code_sha256,pins[i][1])&&digest_is(module,pins[i][2]))return i;
     return -1;
+#endif
 }
 int policy(const ResolvedProgram& p) {
     if(p.stage_mask()!=32 || p.stages().size()!=1)return -1;

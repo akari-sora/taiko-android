@@ -1,4 +1,35 @@
 #include "shader_draw_catalog.h"
+#if defined(DM_TARGET_TAIKO) && DM_TARGET_TAIKO
+namespace dm_android {
+namespace {
+ShaderDigest digest(const char* text){ShaderDigest out{};auto nibble=[](char c){return unsigned(c>='a'?c-'a'+10:c-'0');};for(size_t i=0;i<32;++i)out[i]=uint8_t(nibble(text[i*2])*16+nibble(text[i*2+1]));return out;}
+}
+// These authored diagnostic identities grant no original game shader authority.
+const std::array<ShaderIndexEntry,2>& compiled_draw_catalog(){
+    static const std::array<ShaderIndexEntry,2> value={{
+#include "graphics_fixtures/draw_shaders/catalog_entries.inc"
+    }};return value;
+}
+const std::array<ShaderIndexEntry,2>& compiled_sampled_draw_catalog(){
+    static const std::array<ShaderIndexEntry,2> value={{
+#include "graphics_fixtures/draw_texture_shaders/catalog_entries.inc"
+    }};return value;
+}
+const std::array<ShaderIndexEntry,kCompiledOriginalDrawCount>& compiled_original_draw_catalog(){
+    static const std::array<ShaderIndexEntry,kCompiledOriginalDrawCount> empty{};return empty;
+}
+const std::array<ShaderIndexEntry,kCompiledOriginalDrawCount>& compiled_original_sampled_draw_catalog(){
+    return compiled_original_draw_catalog();
+}
+bool create_draw_source_catalog(const Process&,DrawSourceCatalog* out,std::string* error){
+    if(out)*out={};if(error)*error="Taiko draw shaders are unsupported: no actual Taiko shader catalog; legacy graphics carrier unavailable";return false;
+}
+bool resolve_catalog_draw(const DrawSourceCatalog&,uint64_t,uint64_t,const NVNshaderData*,size_t,
+    ShaderSourceReader,void*,std::shared_ptr<const ResolvedProgram>* out,std::string* error){
+    if(out)out->reset();if(error)*error="Taiko draw shaders are unsupported: no actual Taiko shader catalog";return false;
+}
+}
+#else
 #include "diagnostic_authority.h"
 #include "original_bringup.h"
 #include <cstring>
@@ -112,3 +143,4 @@ bool resolve_catalog_draw(const DrawSourceCatalog& catalog,uint64_t generation,u
     return seen==3&&capture_program_snapshot(generation,serial,3,selected,read_source,&read,&snapshot,error)&&resolve_program(snapshot,{generation,serial},compiled.data(),compiled.size(),read_artifact,nullptr,out,error);
 }
 }
+#endif

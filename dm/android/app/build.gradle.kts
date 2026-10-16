@@ -11,11 +11,12 @@ android {
     compileSdk = 36
     ndkVersion = "28.2.13676358"
     defaultConfig {
-        applicationId = "org.d2rmobile.diagnostics"
+        applicationId = "org.taikocompat.android"
+        testApplicationId = "org.taikocompat.android.test"
         minSdk = 29
         targetSdk = 36
-        versionCode = 13
-        versionName = "0.13.0-dev"
+        versionCode = 1
+        versionName = "0.1.0-taiko"
         ndk { abiFilters += "arm64-v8a" }
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
     }

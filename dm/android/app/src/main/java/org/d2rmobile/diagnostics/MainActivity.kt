@@ -2,13 +2,11 @@ package org.d2rmobile.diagnostics
 
 import android.os.Build
 import android.os.Bundle
-import android.content.Intent
 import android.util.AtomicFile
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -19,12 +17,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
-/** Resource preparation, platform probes and the checked original-entry attempt. */
+/** Shared platform diagnostics. Taiko content import and original launch are unavailable. */
 class MainActivity : GameActivity() {
     private lateinit var status: TextView
     private lateinit var output: TextView
     private lateinit var rerun: Button
-    private lateinit var resourcesUi: ResourceSetupUi
     private lateinit var controllers: ControllerDevices
     private lateinit var keyboard: KeyboardCoordinator
     private lateinit var audio: AudioCoordinator
@@ -111,18 +108,20 @@ class MainActivity : GameActivity() {
             setBackgroundColor(0xfff5f5f5.toInt())
         }
         content.addView(TextView(this).apply {
-            text = "D2R Android"
+            text = getString(R.string.app_name)
             textSize = 24f
         })
-        resourcesUi = ResourceSetupUi(this)
-        content.addView(resourcesUi.view, LinearLayout.LayoutParams(-1, -2))
+        content.addView(TextView(this).apply {
+            text = getString(R.string.taiko_import_unavailable)
+            textSize = 16f
+        })
         content.addView(TextView(this).apply {
             text = "Runtime diagnostics"
             textSize = 21f
             setPadding(0, 24, 0, 8)
         })
         content.addView(TextView(this).apply {
-            text = "Synthetic ARM64, Vulkan, rewritten guest, module loader, kernel and host service fixtures. The original-entry button makes a separate checked retail attempt."
+            text = getString(R.string.diagnostics_intro)
             textSize = 16f
         })
         originalStatus = TextView(this).apply {
@@ -133,7 +132,7 @@ class MainActivity : GameActivity() {
         originalLaunch = Button(this).apply {
             tag = "original-entry-run"
             text = getString(R.string.original_entry_launch)
-            setOnClickListener { OriginalLaunchCoordinator.request(this@MainActivity) }
+            isEnabled = false
         }
         content.addView(originalLaunch)
         content.addView(originalStatus)
@@ -151,8 +150,8 @@ class MainActivity : GameActivity() {
             textSize = 12f
         }
         content.addView(output, LinearLayout.LayoutParams(-1, -2))
-        // Both views sit above GameActivity's actual native surface. Launch mode
-        // hides diagnostics; the overlay draws without collecting touch events.
+        // Retain shared native control wiring, hidden while the Taiko provider
+        // is unavailable. Diagnostics do not expose game-specific controls.
         touchControls = TouchControlOverlay(this)
         addContentView(touchControls, ViewGroup.LayoutParams(-1, -1))
         diagnosticsScroll = ScrollView(this).apply {
@@ -168,12 +167,11 @@ class MainActivity : GameActivity() {
             insets
         }
         content.requestApplyInsets()
-        if (!OriginalLaunchCoordinator.attach(this)) startDiagnostics()
+        startDiagnostics()
     }
 
     override fun onStart() {
         super.onStart()
-        if (::resourcesUi.isInitialized) resourcesUi.onStart()
         DiagnosticCoordinator.readinessChanged()
     }
 
@@ -194,7 +192,6 @@ class MainActivity : GameActivity() {
         }
         if (::audio.isInitialized) audio.resume()
         if (::keyboard.isInitialized) keyboard.resume()
-        OriginalLaunchCoordinator.attach(this)
         DiagnosticCoordinator.readinessChanged()
     }
 
@@ -213,60 +210,17 @@ class MainActivity : GameActivity() {
         if (hasFocus) DiagnosticCoordinator.readinessChanged()
     }
 
-    override fun onStop() {
-        if (::resourcesUi.isInitialized) resourcesUi.onStop()
-        super.onStop()
-    }
-
-    @Deprecated("Platform document picker result callback")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        resourcesUi.onActivityResult(requestCode, resultCode, data)
-    }
-
     private fun startDiagnostics() {
-        if (OriginalLaunchCoordinator.blocksDiagnostics()) return
         DiagnosticCoordinator.request(this)
     }
 
-    /** Main-thread UI projection only; native reports remain execution authority. */
+    /** Legacy coordinator callbacks cannot expose an unavailable Taiko launch. */
+    @Suppress("UNUSED_PARAMETER")
     internal fun renderOriginalLaunch(running: Boolean, report: JSONObject?, failure: String?, retryAllowed: Boolean) {
-        diagnosticsScroll.visibility = if (running) View.INVISIBLE else View.VISIBLE
-        touchControls.visibility = if (running) View.VISIBLE else View.GONE
-        originalLaunch.isEnabled = !running && retryAllowed
-        if (running) {
-            originalStatus.text = getString(R.string.original_entry_preparing)
-            rerun.isEnabled = false
-            gameSurface(window.decorView)?.apply {
-                isFocusable = true
-                isFocusableInTouchMode = true
-                requestFocus()
-            }
-        } else if (report != null || failure != null) {
-            originalStatus.text = if (failure != null) {
-                getString(R.string.original_entry_failed, failure)
-            } else {
-                val nativeStatus = report!!.optString("status")
-                val label = when (nativeStatus) {
-                    "BLOCKED" -> getString(R.string.original_entry_blocked)
-                    "RETAINED_REQUIRE_PROCESS_RESTART" -> getString(R.string.original_entry_needs_restart)
-                    "STOPPED", "NNMAIN_EXITED", "NNMAIN_RETURNED" -> getString(R.string.original_entry_stopped)
-                    else -> nativeStatus
-                }
-                val displayedStatus = if (label == nativeStatus) nativeStatus else "$label（$nativeStatus）"
-                getString(R.string.original_entry_result, displayedStatus, report.optString("error"),
-                    report.optString("lastStep").ifBlank { getString(R.string.original_entry_not_started) })
-            }
-            rerun.isEnabled = retryAllowed
-        }
-    }
-
-    private fun gameSurface(view: View): SurfaceView? {
-        if (view is SurfaceView) return view
-        if (view is ViewGroup) for (index in 0 until view.childCount) {
-            gameSurface(view.getChildAt(index))?.let { return it }
-        }
-        return null
+        diagnosticsScroll.visibility = View.VISIBLE
+        touchControls.visibility = View.GONE
+        originalLaunch.isEnabled = false
+        originalStatus.text = getString(R.string.original_entry_intro)
     }
 
     internal fun diagnosticsDeferred(message: String) {
@@ -376,8 +330,6 @@ class MainActivity : GameActivity() {
         window.decorView.viewTreeObserver.takeIf { it.isAlive }
             ?.removeOnWindowFocusChangeListener(decorFocusListener)
         DiagnosticCoordinator.cancel(this)
-        OriginalLaunchCoordinator.detach(this)
-        if (::resourcesUi.isInitialized) resourcesUi.destroy()
         if (::controllers.isInitialized) controllers.stop()
         super.onDestroy()
     }

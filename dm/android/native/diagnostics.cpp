@@ -26,7 +26,9 @@
 #include "../../platform/android/controller_platform.h"
 #include "../../platform/android/graphics_probes.h"
 #include "../../platform/android/graphics_surface.h"
+#if !defined(DM_TARGET_TAIKO) || !DM_TARGET_TAIKO
 #include "../../platform/android/original_runner.h"
+#endif
 #include "../../platform/android/diagnostic_session.h"
 #include "../../platform/android/oe_platform.h"
 extern "C" {
@@ -679,6 +681,10 @@ Java_org_d2rmobile_diagnostics_NativeGraphics_runComputeDiagnostics(JNIEnv* env,
 }
 extern "C" JNIEXPORT jstring JNICALL
 Java_org_d2rmobile_diagnostics_NativeOriginal_run(JNIEnv* env,jclass,jobject activity) {
+#if defined(DM_TARGET_TAIKO) && DM_TARGET_TAIKO
+    (void)activity;
+    return env->NewStringUTF("{\"schemaVersion\":1,\"suite\":\"taiko-original-entry\",\"status\":\"UNAVAILABLE\",\"gamePlayable\":false,\"originalGame\":\"NOT_RUN\",\"error\":\"Taiko original startup has no admitted build or shader catalog\"}");
+#else
     auto call=enter_group(env,DiagnosticGroup::OriginalEntry,0);if(!call)return nullptr;
     // All ART access happens on the ordinary host stack before the first guest
     // call. The native runner receives owned values and never captures JNIEnv.
@@ -721,6 +727,7 @@ Java_org_d2rmobile_diagnostics_NativeOriginal_run(JNIEnv* env,jclass,jobject act
         }
         return nullptr;
     }
+#endif
 }
 extern "C" JNIEXPORT jstring JNICALL
 Java_org_d2rmobile_diagnostics_NativeGraphics_surfaceSnapshot(JNIEnv* env,jclass,jobject activity) {

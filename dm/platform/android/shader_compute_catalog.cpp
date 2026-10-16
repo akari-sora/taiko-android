@@ -1,4 +1,18 @@
 #include "shader_compute_catalog.h"
+#if defined(DM_TARGET_TAIKO) && DM_TARGET_TAIKO
+namespace dm_android {
+const std::array<ShaderIndexEntry,kCompiledOriginalComputeCount>& compiled_compute_catalog(){
+    static const std::array<ShaderIndexEntry,kCompiledOriginalComputeCount> empty{};return empty;
+}
+bool create_compute_source_catalog(const Process&,ComputeSourceCatalog* out,std::string* error){
+    if(out)*out={};if(error)*error="Taiko original compute shaders are unsupported: no actual Taiko shader catalog";return false;
+}
+bool resolve_catalog_compute(const ComputeSourceCatalog&,uint64_t,uint64_t,const NVNshaderData*,size_t,
+    ShaderSourceReader,void*,std::shared_ptr<const ResolvedProgram>* out,std::string* error){
+    if(out)out->reset();if(error)*error="Taiko original compute shaders are unsupported: no actual Taiko shader catalog";return false;
+}
+}
+#else
 #include "diagnostic_authority.h"
 #include "original_bringup.h"
 #include <cstring>
@@ -110,3 +124,4 @@ bool resolve_catalog_compute(const ComputeSourceCatalog& catalog,uint64_t genera
     if(error)*error="shader pointers do not identify exact current catalog spans";return false;
 }
 }
+#endif

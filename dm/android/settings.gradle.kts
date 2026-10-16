@@ -3,5 +3,5 @@ dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories { google(); mavenCentral() }
 }
-rootProject.name = "D2RAndroidDiagnostics"
+rootProject.name = "TaikoAndroidCompatibility"
 include(":app")

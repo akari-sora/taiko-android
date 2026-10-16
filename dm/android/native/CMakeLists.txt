@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(d2r_diagnostics LANGUAGES C CXX ASM)
+option(DM_TARGET_TAIKO "Build the independent Taiko target without D2R program authority" ON)
 if(NOT ANDROID OR NOT ANDROID_ABI STREQUAL "arm64-v8a")
   message(FATAL_ERROR "Phase 0 requires Android arm64-v8a")
 endif()
@@ -94,8 +95,11 @@ add_library(d2r_diagnostics SHARED diagnostics.cpp
 # provider must not leave a later successful import out of the next binary.
 file(GLOB DM_ORIGINAL_PINS CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/../../platform/android/original_build_pins.cpp")
-if(DM_ORIGINAL_PINS)
+if(DM_ORIGINAL_PINS AND NOT DM_TARGET_TAIKO)
   target_sources(d2r_diagnostics PRIVATE ${DM_ORIGINAL_PINS})
+endif()
+if(DM_TARGET_TAIKO)
+  target_compile_definitions(d2r_diagnostics PRIVATE DM_TARGET_TAIKO=1)
 endif()
 target_include_directories(d2r_diagnostics PRIVATE ../../gfx/nvn/include)
 set_source_files_properties(../../host/dm_custom.c PROPERTIES COMPILE_DEFINITIONS DM_ANDROID_CONFIG_ONLY=1)

@@ -1,4 +1,38 @@
 #include "graphics_probes.h"
+#if defined(DM_TARGET_TAIKO) && DM_TARGET_TAIKO
+// The legacy carrier embeds D2R compute records as well as authored tests.
+// Exclude its byte array entirely until a separate authored-only carrier exists.
+namespace {
+std::string unavailable_graphics_probe(const char* suite){
+    return std::string("{\"schemaVersion\":1,\"suite\":\"")+suite+
+        "\",\"status\":\"UNAVAILABLE\",\"target\":\"Taiko\",\"gamePlayable\":false,\"originalGame\":\"NOT_RUN\","
+        "\"error\":\"Legacy graphics carrier contains D2R original compute records; no actual Taiko shader catalog\",\"checks\":[]}";
+}
+bool unavailable_graphics_control(std::string* error){
+    if(error)*error="graphics diagnostic carrier unavailable for Taiko";return false;
+}
+}
+std::string dm_android_run_graphics_probes(){return unavailable_graphics_probe("AndroidGraphics");}
+std::string dm_android_run_graphics_extended_probes(){return unavailable_graphics_probe("AndroidGraphicsExtended");}
+std::string dm_android_run_shader_compute_probes(){return unavailable_graphics_probe("android-original-compute");}
+std::string dm_android_run_vi_probes(){return unavailable_graphics_probe("AndroidVI");}
+std::string dm_android_run_window_probes(){return unavailable_graphics_probe("AndroidWindow");}
+std::string dm_android_run_sampled_draw_probes(){return unavailable_graphics_probe("AndroidSampledDraw");}
+std::string dm_android_sampled_frame_snapshot(){return unavailable_graphics_probe("AndroidSampledFrame");}
+bool dm_android_sampled_frame_ack(uint64_t,unsigned){return false;}
+std::string dm_android_run_shader_draw_probes(DmGraphicsDrawReadback* image,
+    const std::function<bool(const DmGraphicsDrawReadback&,std::string*)>&){
+    if(image)*image={};return unavailable_graphics_probe("AndroidShaderDraw");
+}
+bool dm_android_graphics_begin(uint64_t* handle,std::string* error){if(handle)*handle=0;return unavailable_graphics_control(error);}
+bool dm_android_graphics_poll(uint64_t,std::string* report,std::string* error){if(report)*report=unavailable_graphics_probe("AndroidGraphics");return unavailable_graphics_control(error);}
+bool dm_android_graphics_wait(uint64_t,uint64_t,std::string* report,std::string* error){if(report)*report=unavailable_graphics_probe("AndroidGraphics");return unavailable_graphics_control(error);}
+bool dm_android_graphics_end(uint64_t,std::string* error){return unavailable_graphics_control(error);}
+bool dm_android_graphics_arm_publication_barrier(uint64_t* id,std::string* error){if(id)*id=0;return unavailable_graphics_control(error);}
+bool dm_android_graphics_publication_barrier_snapshot(uint64_t,DmGraphicsPublicationBarrier* out,std::string* error){if(out)*out={};return unavailable_graphics_control(error);}
+bool dm_android_graphics_release_publication_barrier(uint64_t,std::string* error){return unavailable_graphics_control(error);}
+bool dm_android_graphics_retention_snapshot(uint64_t,std::string* report,std::string* error){if(report)*report=unavailable_graphics_probe("AndroidGraphicsRetention");return unavailable_graphics_control(error);}
+#else
 #include "diagnostic_authority.h"
 #include "graphics_platform.h"
 #include "vi_platform.h"
@@ -1476,3 +1510,4 @@ std::string dm_android_run_shader_draw_probes(DmGraphicsDrawReadback* image,
       <<",\"afterFinalize\":"<<finalized.live<<"},\"sdkPackageSha256\":\""<<hex(dm_graphics_package_sha256,32)<<"\",\"unsupported\":[\"textures\",\"original-game-draw\",\"full-product\"]}";
     return out.str();
 }
+#endif

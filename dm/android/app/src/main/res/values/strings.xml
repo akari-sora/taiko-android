@@ -1,6 +1,9 @@
 <resources>
-    <string name="original_entry_intro">Android 測試畫面已顯示，畫面能在調整尺寸與背景恢復後保持正常。遊戲本體尚未啟動；接下來接上遊戲啟動與必要資源。目前不宣稱可玩。</string>
-    <string name="original_entry_launch">嘗試啟動原版（開發中）</string>
+    <string name="app_name">Taiko Android Compatibility</string>
+    <string name="taiko_import_unavailable">Taiko 資料匯入目前不可用：專用內容識別與匯入流程尚未接妥。</string>
+    <string name="diagnostics_intro">Synthetic ARM64, Vulkan, guest loader, kernel and host service diagnostics. Test graphics are diagnostic fixtures; they do not demonstrate Taiko execution or gameplay.</string>
+    <string name="original_entry_intro">Taiko 原版啟動目前不可用：Taiko 專用執行提供者尚未接妥。下方僅提供共用核心診斷；測試圖形不代表 Taiko 已啟動或可玩。</string>
+    <string name="original_entry_launch">Taiko 原版啟動不可用</string>
     <string name="original_entry_preparing">正在核對原版內容與啟動條件…</string>
     <string name="original_entry_result">%1$s：%2$s\n原版畫面：尚未確認；最後步驟：%3$s</string>
     <string name="original_entry_not_started">尚未進入原版</string>

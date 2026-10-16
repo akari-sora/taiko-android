@@ -16,18 +16,26 @@ bool overlap(const ComputeSpan& a,const ComputeSpan& b){return a.pool==b.pool&&a
 uint64_t PreparedDraw::owned_bytes()const{uint64_t bytes=sizeof(*this)+state_.ubos.capacity()*sizeof(p_bind_buf)+descriptors_.capacity()*sizeof(DrawDescriptor)+reads_.capacity()*sizeof(ComputeSpan);for(const auto& d:descriptors_)bytes+=d.initial.capacity();return bytes;}
 namespace {
 bool original_program(const ResolvedProgram& program){
+#if defined(DM_TARGET_TAIKO) && DM_TARGET_TAIKO
+    (void)program;return false;
+#else
     const auto digest=[](const char* text){ShaderDigest out{};auto nibble=[](char c){return unsigned(c>='a'?c-'a'+10:c-'0');};for(size_t i=0;i<32;++i)out[i]=uint8_t(nibble(text[2*i])*16+nibble(text[2*i+1]));return out;};
     static const std::array<ShaderIndexEntry,2> entries={{
 #include "../../platform/android/original_draw_shaders/catalog_entries.inc"
     }};
     return program.stages().size()==2&&std::all_of(program.stages().begin(),program.stages().end(),[&](const auto& stage){return stage&&std::any_of(entries.begin(),entries.end(),[&](const auto& entry){return shader_typed_key_equal(stage->key(),entry.key)&&stage->file_sha256()==entry.expected_file_sha256;});});
+#endif
 }
 bool original_sampled_program(const ResolvedProgram& program){
+#if defined(DM_TARGET_TAIKO) && DM_TARGET_TAIKO
+    (void)program;return false;
+#else
     const auto digest=[](const char* text){ShaderDigest out{};auto nibble=[](char c){return unsigned(c>='a'?c-'a'+10:c-'0');};for(size_t i=0;i<32;++i)out[i]=uint8_t(nibble(text[2*i])*16+nibble(text[2*i+1]));return out;};
     static const std::array<ShaderIndexEntry,2> entries={{
 #include "../../platform/android/original_sampled_shaders/catalog_entries.inc"
     }};
     return program.stages().size()==2&&std::all_of(program.stages().begin(),program.stages().end(),[&](const auto& stage){return stage&&std::any_of(entries.begin(),entries.end(),[&](const auto& entry){return shader_typed_key_equal(stage->key(),entry.key)&&stage->file_sha256()==entry.expected_file_sha256;});});
+#endif
 }
 bool check_original_sampled_program(const ResolvedProgram& program,std::string* error){
     uint32_t seen=0;
