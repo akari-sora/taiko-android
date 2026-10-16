@@ -8,6 +8,7 @@
 #include <android/log.h>
 #include <sys/auxv.h>
 #include <cerrno>
+#include <elf.h>
 #include <cstring>
 #include <sstream>
 #include <time.h>
@@ -15,6 +16,7 @@
 
 extern "C" {
 uint64_t guest_ns(void);
+uint64_t dm_android_test_svc36_retirement(uintptr_t,uint32_t*,uint64_t*);
 void guest_clock_freeze_for(int reason, int on);
 uint64_t svc_dispatch(int number, uint64_t* registers, uint64_t return_address);
 }
@@ -343,6 +345,84 @@ void* native_wait_release(void* opaque) {
     }
     return nullptr;
 }
+
+// Check the exact already-loaded capsule, its source site, SVC metadata, and
+// mapped prefix. Never derive callback authority from an arbitrary RX address.
+bool native_wait_retirement_entry(HleRuntime& runtime,uintptr_t* entry) {
+    if(!entry || runtime.process().modules().size()!=1 ||
+       !runtime.process().symbol("native_wait_svc36",entry))return false;
+    const auto& module=*runtime.process().modules()[0];
+    LoadedPackageAuthority authority{};
+    if(!runtime.process().loaded_package_authority(0,&authority) ||
+       authority.capsule_bytes!=dm_native_wait_size ||
+       std::memcmp(authority.capsule_sha256.data(),dm_native_wait_package_sha256,32) ||
+       !module.mapping.base || !module.mapping.sealed || !module.package)return false;
+    const auto& package=*module.package;
+    if(package.bytes.size()>module.mapping.mapping_size)return false;
+    const uintptr_t base=reinterpret_cast<uintptr_t>(module.mapping.base);
+    if(*entry<base || *entry-base>package.original_size || package.original_size-(*entry-base)<8)return false;
+    const size_t offset=*entry-base;
+    HostModuleView view{};
+    if(!runtime.process().borrowed_module(0,&view) || !view.symbols || !view.strings ||
+       view.symbol_count!=package.symbol_count)return false;
+    const auto* symbols=static_cast<const Elf64_Sym*>(view.symbols);
+    unsigned typed_symbols=0;
+    for(size_t index=0;index<view.symbol_count;++index) {
+        const auto& symbol=symbols[index];
+        if(symbol.st_name>=package.string_bytes)return false;
+        const char* name=view.strings+symbol.st_name;
+        if(!std::memchr(name,0,package.string_bytes-symbol.st_name))return false;
+        if(std::strcmp(name,"native_wait_svc36"))continue;
+        if(!symbol.st_shndx || symbol.st_shndx==SHN_ABS || ELF64_ST_TYPE(symbol.st_info)!=STT_FUNC ||
+           symbol.st_size!=8 || symbol.st_value!=offset)return false;
+        ++typed_symbols;
+    }
+    if(typed_symbols!=1)return false;
+    auto executable=[&](size_t start,size_t size) {
+        for(const auto& segment:package.segments)
+            if((segment.flags&(DM_GUEST_READ|DM_GUEST_EXEC))==(DM_GUEST_READ|DM_GUEST_EXEC) &&
+               start>=segment.offset && start-segment.offset<=segment.size && size<=segment.size-(start-segment.offset))return true;
+        return false;
+    };
+    if(!executable(offset,8))return false;
+    const RewriteSite* selected=nullptr;
+    for(const auto& site:package.sites)if(site.original_offset==offset) {
+        if(selected)return false;
+        selected=&site;
+    }
+    if(!selected || selected->trampoline_offset>package.bytes.size() ||
+       package.bytes.size()-selected->trampoline_offset<28 || !executable(selected->trampoline_offset,28))return false;
+    uint32_t source[2]{},prefix[7]{};
+    std::memcpy(source,reinterpret_cast<const void*>(*entry),sizeof(source));
+    std::memcpy(prefix,reinterpret_cast<const void*>(base+selected->trampoline_offset),sizeof(prefix));
+    int64_t branch_words=source[0]&0x03ffffffu;
+    if(branch_words&(1<<25))branch_words-=int64_t{1}<<26;
+    if((source[0]&0xfc000000u)!=0x14000000u || source[1]!=0xd65f03c0u ||
+       static_cast<int64_t>(offset)+branch_words*4!=static_cast<int64_t>(selected->trampoline_offset) ||
+       prefix[0]!=0xd5033f5fu || prefix[1]!=0xd10043ffu || prefix[2]!=0xa9007bfdu ||
+       (prefix[3]&0xff00001fu)!=0x5800001eu || prefix[4]!=0xd63f03c0u ||
+       prefix[5]!=0xa9407bfdu || prefix[6]!=0x910043ffu)return false;
+    int64_t literal_words=(prefix[3]>>5)&0x7ffffu;
+    if(literal_words&(1<<18))literal_words-=int64_t{1}<<19;
+    const int64_t literal=static_cast<int64_t>(selected->trampoline_offset)+12+literal_words*4;
+    if(literal<0 || static_cast<uint64_t>(literal)>package.bytes.size() ||
+       package.bytes.size()-static_cast<size_t>(literal)<sizeof(uintptr_t))return false;
+    unsigned fixups=0;
+    for(const auto& fixup:package.fixups)if(fixup.offset==static_cast<size_t>(literal)) {
+        if(fixup.helper!=DM_GUEST_DISPATCH_HELPER)return false;
+        ++fixups;
+    }
+    uintptr_t dispatch=0;
+    std::memcpy(&dispatch,reinterpret_cast<const void*>(base+literal),sizeof(dispatch));
+    if(fixups!=1 || dispatch!=reinterpret_cast<uintptr_t>(&dm_android_dispatch_gate))return false;
+    unsigned matches=0;
+    for(const auto& gate:package.gates)if(gate.return_offset==selected->trampoline_offset+20) {
+        if(gate.kind!=DM_GUEST_SVC || gate.argument!=0x36)return false;
+        ++matches;
+    }
+    return matches==1;
+}
+
 bool native_wait_frames_equal(const NativeWaitFrames& snapshots,bool svc_only) {
     const auto& before=snapshots.frames[0];const auto& after=snapshots.frames[1];
     if(!snapshots.guards() || before.guest_sp!=after.guest_sp || before.nzcv!=after.nzcv ||
@@ -364,13 +444,15 @@ std::string dm_android_run_native_wait_probe() {
                        dm_android::native_wait_event_stream_available();
     std::string error;
     bool passed=capable,ready=false;
-    uint64_t svc_calls=0;
+    uint64_t svc_calls=0,retirement_status=UINT64_MAX;
+    unsigned retirement_attempts=0;
+    bool retirement_passed=false,retirement_cell_unchanged=false,prefix_verified=false;
     unsigned cases=0,contentions=0;
     unsigned layout_cases[2]{},layout_contentions[2]{};
     HleRuntime runtime;
     GuestEnvironment environment;
     GuestStack stack(256*1024);
-    uintptr_t wait_entries[2]{},svc_entry=0;
+    uintptr_t wait_entries[2]{},svc_entry=0,retirement_entry=0;
     constexpr const char* wait_symbols[]{"native_wait_entry","native_wait_compact_entry"};
     if(capable) {
         std::unique_ptr<ModulePackage> package;
@@ -387,6 +469,9 @@ std::string dm_android_run_native_wait_probe() {
             ready=runtime.register_main()!=0 && runtime.process().symbol(wait_symbols[0],&wait_entries[0]) &&
                   runtime.process().symbol(wait_symbols[1],&wait_entries[1]) &&
                   runtime.process().symbol("native_wait_svc_frame_entry",&svc_entry);
+            prefix_verified=ready && native_wait_retirement_entry(runtime,&retirement_entry);
+            if(ready && !prefix_verified)error="loaded SVC36 lacks exact preframe retirement/dispatch authority";
+            ready=ready && prefix_verified;
         }
         passed=ready;
     } else error="AT_HWCAP lacks supported EVTSTRM; native WFE execution was not attempted";
@@ -404,6 +489,34 @@ std::string dm_android_run_native_wait_probe() {
             native_wait_frames_equal(snapshots,true) && same_host_wait_state(host_before,host_after) &&
             !std::memcmp(tlr_before.data(),tlr,tlr_before.size()) && !dm_android_peek_guest_state();
         if(!passed && error.empty())error="owned SVC36 frame/TLR/host-state preservation failed";
+    }
+    if(passed) {
+        NativeWaitMutex mutex;
+        mutex.cell=0x12345678;
+        struct alignas(16) RetirementResult {
+            uint64_t loaded=UINT64_MAX,status=UINT64_MAX,nzcv_before=UINT64_MAX,nzcv_after=0;
+        } result_words;
+        const uint16_t zero=0;
+        std::memcpy(tlr+0x102,&zero,sizeof(zero));
+        std::array<uint8_t,0x200> tlr_before{};
+        std::memcpy(tlr_before.data(),tlr,tlr_before.size());
+        GuestCallResult result;
+        const uint64_t arguments[]{retirement_entry,reinterpret_cast<uintptr_t>(&mutex.cell),
+                                   reinterpret_cast<uintptr_t>(&result_words)};
+        const auto host_before=host_wait_state();
+        const bool called=stack.call(environment.state,reinterpret_cast<uintptr_t>(&dm_android_test_svc36_retirement),
+                                     arguments,3,&result,&error);
+        const auto host_after=host_wait_state();
+        retirement_attempts=called?1:0;
+        retirement_status=result_words.status;
+        retirement_cell_unchanged=mutex.guards() && mutex.cell==0x12345678;
+        svc_calls=runtime.svc_count(0x36);
+        retirement_passed=called && !result.exited && result.value==1 && result_words.loaded==0x12345678 &&
+            retirement_status==1 && retirement_cell_unchanged && svc_calls==2 &&
+            result_words.nzcv_before==result_words.nzcv_after && same_host_wait_state(host_before,host_after) &&
+            !std::memcmp(tlr_before.data(),tlr,tlr_before.size()) && !dm_android_peek_guest_state();
+        passed=retirement_passed;
+        if(!passed && error.empty())error="explicit SVC36 retirement prefix/outcome/TLR/host-state proof failed";
     }
     for(unsigned layout=0;passed && layout<2;++layout) {
     for(unsigned index=0;passed && index<5;++index) {
@@ -454,9 +567,14 @@ std::string dm_android_run_native_wait_probe() {
         passed=false;if(error.empty())error="native wait resources did not retire";
     }
     std::ostringstream json;
-    json<<"{\"schemaVersion\":2,\"syntheticOnly\":true,\"gamePlayable\":false,\"originalSdk\":\"NOT_RUN\","
+    json<<"{\"schemaVersion\":3,\"syntheticOnly\":true,\"gamePlayable\":false,\"originalSdk\":\"NOT_RUN\","
         <<"\"status\":\""<<(passed?"PASS":capable?"FAIL":"UNSUPPORTED")<<"\",\"hwcap\":"<<hwcap
         <<",\"eventStream\":"<<(capable?"true":"false")<<",\"svc36Calls\":"<<svc_calls
+        <<",\"svc36Retirement\":{\"status\":\""<<(retirement_passed?"PASS":retirement_attempts?"FAIL":"NOT_RUN")
+        <<"\",\"attempts\":"<<retirement_attempts<<",\"stxrStatus\":"<<retirement_status
+        <<",\"cellUnchanged\":"<<(retirement_cell_unchanged?"true":"false")
+        <<",\"prefixVerified\":"<<(prefix_verified?"true":"false")
+        <<",\"source\":\"fixed-native-helper-to-loaded-native_wait_svc36\"}"
         <<",\"mutexCases\":"<<cases<<",\"contendedCases\":"<<contentions
         <<",\"layouts\":[{\"symbol\":\"native_wait_entry\",\"nativeUnionWords\":45,\"mutexCases\":"<<layout_cases[0]
         <<",\"contendedCases\":"<<layout_contentions[0]<<"},{\"symbol\":\"native_wait_compact_entry\",\"nativeUnionWords\":39,\"mutexCases\":"<<layout_cases[1]

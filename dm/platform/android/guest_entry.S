@@ -351,3 +351,35 @@ dm_android_character_isalpha_entry:
     b dm_android_character_isalpha_from_guest
 .size dm_android_character_isalpha_entry, .-dm_android_character_isalpha_entry
 .section .note.GNU-stack,"",%progbits
+
+// Diagnostics only. The caller supplies an exact symbol from its verified,
+// currently loaded native-wait capsule. This is not a callback/RX admission API.
+// x0=normal SVC36 entry, x1=owned cell, x2=four-u64 result record.
+// All prologue memory work precedes LDAXR; the first post-call instruction is
+// STXR. Only the actual generated SVC gate may touch memory between them.
+.text
+.p2align 2
+.global dm_android_test_svc36_retirement
+.hidden dm_android_test_svc36_retirement
+.type dm_android_test_svc36_retirement,%function
+dm_android_test_svc36_retirement:
+    stp x19,x20,[sp,#-48]!
+    stp x21,x22,[sp,#16]
+    stp x29,x30,[sp,#32]
+    mov x19,x1
+    mov x20,x0
+    mov x21,x2
+    mov w8,#0x5a5a
+    mrs x22,nzcv
+    ldaxr w9,[x19]
+    blr x20
+    stxr w10,w8,[x19]
+    mrs x11,nzcv
+    stp x9,x10,[x21]
+    stp x22,x11,[x21,#16]
+    mov x0,x10
+    ldp x29,x30,[sp,#32]
+    ldp x21,x22,[sp,#16]
+    ldp x19,x20,[sp],#48
+    ret
+.size dm_android_test_svc36_retirement,.-dm_android_test_svc36_retirement

@@ -31,7 +31,7 @@ class NativeWaitTest : InstrumentationTestCase() {
                     put("fingerprint", Build.FINGERPRINT)
                 })
             }
-            val target = AtomicFile(File(instrumentation.targetContext.filesDir, "native-wait-report.json"))
+            val target = AtomicFile(File(instrumentation.targetContext.filesDir, "native-wait-retirement-report.json"))
             val stream = target.startWrite()
             try {
                 stream.write(report.toString(2).toByteArray(Charsets.UTF_8))
@@ -40,14 +40,21 @@ class NativeWaitTest : InstrumentationTestCase() {
                 target.failWrite(stream)
                 throw error
             }
-            assertEquals(2, report.getInt("schemaVersion"))
+            assertEquals(3, report.getInt("schemaVersion"))
             assertTrue(report.getBoolean("syntheticOnly"))
             assertFalse(report.getBoolean("gamePlayable"))
             assertEquals("NOT_RUN", report.getString("originalSdk"))
             // Unsupported hardware is retained explicitly and cannot count as PASS.
             assertEquals(report.toString(), "PASS", report.getString("status"))
             assertTrue(report.getBoolean("eventStream"))
-            assertEquals(1L, report.getLong("svc36Calls"))
+            assertEquals(2L, report.getLong("svc36Calls"))
+            val retirement = report.getJSONObject("svc36Retirement")
+            assertEquals("PASS", retirement.getString("status"))
+            assertEquals(1, retirement.getInt("attempts"))
+            assertEquals(1L, retirement.getLong("stxrStatus"))
+            assertTrue(retirement.getBoolean("cellUnchanged"))
+            assertTrue(retirement.getBoolean("prefixVerified"))
+            assertEquals("fixed-native-helper-to-loaded-native_wait_svc36", retirement.getString("source"))
             assertEquals(10, report.getInt("mutexCases"))
             assertEquals(4, report.getInt("contendedCases"))
             val layouts = report.getJSONArray("layouts")
