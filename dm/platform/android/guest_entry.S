@@ -331,8 +331,10 @@ dm_android_test_guest_frame:
 .size dm_android_test_guest_frame, .-dm_android_test_guest_frame
 // Typed entries capture genuine incoming guest LR/SP before any C call.
 // Their target must match the one-shot typed guarded-transfer receipt.
+// Bind these internal registry targets locally in the final ELF.
 .p2align 2
 .global dm_android_swkbd_entry
+.hidden dm_android_swkbd_entry
 .type dm_android_swkbd_entry, %function
 dm_android_swkbd_entry:
     mov x2, x30
@@ -341,6 +343,7 @@ dm_android_swkbd_entry:
 .size dm_android_swkbd_entry, .-dm_android_swkbd_entry
 .p2align 2
 .global dm_android_character_isalpha_entry
+.hidden dm_android_character_isalpha_entry
 .type dm_android_character_isalpha_entry, %function
 dm_android_character_isalpha_entry:
     mov x1, x30
