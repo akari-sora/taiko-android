@@ -23,6 +23,9 @@
 #include "hle.h"
 #include <unistd.h>
 #include "front.h"
+#ifdef __ANDROID__
+Result dm_android_swkbd_show(void *out, const void *arg);
+#endif
 
 enum { ARG_HEADER = 0x24, ARG_SUB = 0xa6, ARG_GUIDE = 0x1a8, ARG_MAXLEN = 0x3ac, ARG_MINLEN = 0x3b0, ARG_UTF8 = 0x3bd,
        ARG_INIT_OFF = 0x3c0, ARG_INIT_LEN = 0x3c4, ARG_WORKBUF = 0x4d0,
@@ -95,7 +98,9 @@ Result swkbd_show(void *out, const void *arg_, swkbd_input_fn input) {
     LOG("swkbd：标题「%s」初始「%s」上限 %d → %s%s%s", title, init, maxlen,
         r > 0 ? "确定「" : r == 0 ? "取消" : "无窗口按取消", r > 0 ? text : "", r > 0 ? "」" : "");
     if (r <= 0) return SWKBD_RESULT_CANCELED;
+#ifndef __ANDROID__
     if (g_swkbd_name_panel && g_swkbd_unfilter && g_swkbd_unfilter()) LOG("swkbd：起名面板——已关掉游戏对返回串的 ASCII 键入过滤（中文名放行，见 hle_charname.c）");
+#endif
 
     uint8_t *buf; uint64_t cap; memcpy(&buf, (uint8_t *)out, 8); memcpy(&cap, (uint8_t *)out + 8, 8);
     if (!buf || !cap) return RES_OK;                         // 与 SDK 同：String 未给缓冲则不读文本 | same as the SDK: if String has no buffer, the text is not read
@@ -103,12 +108,29 @@ Result swkbd_show(void *out, const void *arg_, swkbd_input_fn input) {
     uint16_t u16[1003]; size_t n = swkbd_u8_to_u16(text, maxlen > 0 ? (size_t)maxlen : 1002, u16, 1003);   // 按字数上限截断（UTF-16 单元计） | truncate to the character limit (counted in UTF-16 units)
     if (arg[ARG_UTF8]) swkbd_u16_to_u8(u16, n, (char *)buf, cap);
     else memcpy(buf, u16, (n + 1) * 2 <= cap ? n * 2 : (cap / 2 - 1) * 2);
-    { char fin[64]; swkbd_u16_to_u8(u16, n, fin, sizeof fin); void dm_ui_text_entered(const char *text); dm_ui_text_entered(n > 0 ? fin : NULL); }
+#ifndef __ANDROID__
+    { char fin[64]; swkbd_u16_to_u8(u16, n, fin, sizeof fin);
+      void dm_ui_text_entered(const char *text); dm_ui_text_entered(n > 0 ? fin : NULL); }
+#endif
+    // Android publishes pinned SDK output before the optional frontend notify;
+    // swkbd_show receives trusted staging from its checked adapter there.
     { const char *lag = getenv("DM_TEST_SWKBD_LAG_MS"); if (lag) usleep((useconds_t)atoi(lag) * 1000); }   // 测试：把「键盘已交回 → 游戏那条线程拿到结果」拖慢，验自动接受不抢跑   // 前端路径理顺（dm_cursor.c）：起名页输完名字自动接受 | test: slow down "keyboard handed back → the game's thread gets the result" to verify that auto-accept does not jump the gun   // front end path cleanup (dm_cursor.c): auto-accept after the name is typed on the naming page
     return RES_OK;
 }
 
+#ifdef __ANDROID__
+extern void dm_android_swkbd_entry(void);
+__attribute__((used,aligned(8),section("swforce"))) static const hle_force_ent swkbd_guest_entry = {
+    "_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE",(void*)dm_android_swkbd_entry,
+    "Software keyboard: checked SDK String output with typed guest call origin"};
+#else
 HLE_FORCE("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", "软键盘小程序 → 宿主原生输入框（DM_KBD 直给文本）",
           Result, h_swkbd_Show, void *out, const void *arg) {
+#ifdef __ANDROID__
+    return dm_android_swkbd_show(out, arg);
+#else
     return swkbd_show(out, arg, front_text_input);
+#endif
 }
+
+#endif

@@ -20,12 +20,31 @@
 //   everything else.
 #include "dm_i18n.h"
 #include "dm_i18n_tab.h"
+#ifdef __ANDROID__
+#include "../platform/android/app_platform.h"
+#include <pthread.h>
+#else
 #include <TargetConditionals.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 _Atomic int g_dm_lang = -1;
+#ifdef __ANDROID__
+static _Atomic int g_android_settings_language = -2;
+static pthread_mutex_t g_android_language_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_android_locale[64];
+int dm_android_i18n_prepare(const char *locale) {
+    if (!locale || strlen(locale) >= sizeof g_android_locale) return 0;
+    pthread_mutex_lock(&g_android_language_lock);
+    strcpy(g_android_locale, locale);
+    atomic_store(&g_android_settings_language, -2);
+    atomic_store(&g_dm_lang, -1);
+    pthread_mutex_unlock(&g_android_language_lock);
+    return 1;
+}
+#endif
 
 #if TARGET_OS_IPHONE
 #include <CoreFoundation/CoreFoundation.h>
@@ -55,7 +74,12 @@ int dm_lang_from_tag(const char *t) {
 // DM_LANG (host / test simulation, same as hle_oe.c) takes priority; a non-iOS host has no system language to ask and stays Simplified Chinese as before
 int dm_sys_lang(void) {
     const char *e = getenv("DM_LANG"); if (e && *e) return dm_lang_from_tag(e);
-#if TARGET_OS_IPHONE
+#if defined(__ANDROID__)
+    pthread_mutex_lock(&g_android_language_lock);
+    int r = dm_lang_from_tag(g_android_locale);
+    pthread_mutex_unlock(&g_android_language_lock);
+    return r;
+#elif TARGET_OS_IPHONE
     int r = 8; CFArrayRef a = CFLocaleCopyPreferredLanguages();
     if (a) { if (CFArrayGetCount(a) > 0) { char t[64]; if (CFStringGetCString((CFStringRef)CFArrayGetValueAtIndex(a, 0), t, sizeof t, kCFStringEncodingUTF8)) r = dm_lang_from_tag(t); } CFRelease(a); }
     return r;
@@ -75,7 +99,12 @@ static int settings_lang(void) {   // 设置文件里的 "Language"；文件不�
 
 int dm_lang_index(void) {
     int l = atomic_load(&g_dm_lang); if (l >= 0) return l;
+#ifdef __ANDROID__
+    int f = atomic_load(&g_android_settings_language);
+    if (f == -2) { f = settings_lang(); atomic_store(&g_android_settings_language, f); }
+#else
     static _Atomic int file = -2; int f = atomic_load(&file); if (f == -2) { f = settings_lang(); atomic_store(&file, f); }
+#endif
     return f < 0 ? 8 : f;   // 有设置文件但没写语言 = 游戏缺省（宿主报 zh-Hans） | settings file exists but has no language entry = the game default (the host reports zh-Hans)
 }
 int dm_lang_zh(void) { int l = dm_lang_index(); return l == 8 || l == 9; }   // 繁体（zhTW）我们的字也用简中（繁体玩家读简体比读英文顺） | for Traditional Chinese (zhTW) our text also uses Simplified Chinese (Traditional Chinese players read Simplified more easily than English)

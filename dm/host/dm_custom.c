@@ -90,6 +90,21 @@ void dm_custom_on_uimsg(const char *cat, const char *act, const char *arg) {
     else if (!strcmp(act, "ResetToDefaults")) { for (int i = 1; i < NK; i++) atomic_store(&g_pend[i], k_def[i]); atomic_store(&g_repaint, 1); }   // 从 1 起：语言那一格不归「默认」管 | Starts from 1: the language cell is not governed by 「默认」(Default)
 }
 
+#if defined(__ANDROID__) && defined(DM_ANDROID_CONFIG_ONLY)
+// The Android target can reuse the actual persistent store before its guest
+// widget/input adapter is linked. No widget-pump substitute is exported.
+void dm_android_custom_reset(void) {
+    atomic_store(&g_loaded, 0);
+    atomic_store(&g_lang_explicit, -1);
+    atomic_store(&g_merc_explicit, -1);
+    atomic_store(&g_repaint, 0);
+    for (int i = 0; i < NK; ++i) {
+        atomic_store(&g_val[i], 0);
+        atomic_store(&g_pend[i], -1);
+    }
+    memset(g_dir, 0, sizeof g_dir);
+}
+#else
 // ---- 选项页上的勾选框
 // ---- Checkboxes on the options page
 static uint8_t *main_base(void) { static uint8_t *b; if (!b) for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) b = (uint8_t *)g_mod[i].base; return b; }
@@ -169,3 +184,4 @@ void dm_custom_ui_pump(unsigned long long root) {
     if (vt_ok) { int dirty = 0; for (int i = 0; i < NK; i++) { int pd = atomic_load(&g_pend[i]); dirty |= pd >= 0 && pd != atomic_load(&g_val[i]); }
         if (*(uint8_t *)(sp + 0x1a0) != dirty) { *(uint8_t *)(sp + 0x1a0) = (uint8_t)dirty; LOG("自定义设置：有未应用的改动 → %d（「应用 / 放弃」%s）", dirty, dirty ? "点亮" : "变灰"); } }
 }
+#endif

@@ -4,7 +4,12 @@
 // (The former 136 HLE entries for nn::os/mem/lmem/C++ ABI have been deleted: the SDK brings its own nn::os, and at load time not one of these entries was resolved and used.)
 #include <pthread.h>
 #include "hle.h"
+#ifdef __ANDROID__
+#include <time.h>
+#include "../platform/android/kernel_platform.h"
+#else
 #include <mach/mach_time.h>
+#endif
 #include <stdatomic.h>
 
 // ---------- 旁表 ----------
@@ -12,6 +17,15 @@
 #define OM_SIZE (1u << 18)
 static struct { const void *k; void *v; } g_om[OM_SIZE];
 static pthread_mutex_t g_om_lock = PTHREAD_MUTEX_INITIALIZER;
+#ifdef __ANDROID__
+/* Caller has stopped guest callbacks/threads and released owned host objects.
+ * Clear tombstones as well as entries before guest addresses can be reused. */
+void dm_android_host_objects_reset(void) {
+    pthread_mutex_lock(&g_om_lock);
+    memset(g_om,0,sizeof(g_om));
+    pthread_mutex_unlock(&g_om_lock);
+}
+#endif
 static unsigned om_h(const void *k) { uint64_t x = (uint64_t)k; x ^= x >> 29; x *= 0xbf58476d1ce4e5b9ull; return (unsigned)(x >> 40) & (OM_SIZE - 1); }
 void *objmap_get(const void *k) {
     pthread_mutex_lock(&g_om_lock);
@@ -40,9 +54,15 @@ void *objmap_del(const void *k) {
     return r;
 }
 uint64_t now_ns(void) {
+#ifdef __ANDROID__
+    struct timespec ts;
+    if(clock_gettime(CLOCK_MONOTONIC,&ts))die("CLOCK_MONOTONIC unavailable");
+    return (uint64_t)ts.tv_sec*1000000000ull+(uint64_t)ts.tv_nsec;
+#else
     static mach_timebase_info_data_t tb;
     if (!tb.denom) mach_timebase_info(&tb);
     return mach_absolute_time() * tb.numer / tb.denom;
+#endif
 }
 // 客体时钟：客体能读到的系统计数器（mrs cntpct 门、svc GetSystemTick）都经这里。缺省 = now_ns()。
 // 冻结（只供测试驱动 DM_TICK_HOLD 用）：冻结期间客体时钟不走 ⇒ 游戏不会到期下一拍；解冻后扣掉冻结时长，客体时钟连续不跳
@@ -56,9 +76,25 @@ uint64_t now_ns(void) {
 // Before the first frame the wall clock is still used (the boot period has waits that poll by time, freezing would hang them); at the switch it continues from the guest clock value at that time, no jump. It does not advance while frozen.
 static _Atomic uint64_t g_gfrozen, g_glag, g_gdet, g_guest_frame; static _Atomic int g_gfz, g_gdet_on; static uint64_t g_gdet_step = 1;
 uint64_t dm_guest_frame(void) { return atomic_load(&g_guest_frame); }
+#ifdef __ANDROID__
+static int g_detclock_cfg = -1;
+static pthread_mutex_t g_detclock_cfg_mu = PTHREAD_MUTEX_INITIALIZER;
+#endif
 static int detclock_cfg(void) {
+#ifdef __ANDROID__
+    pthread_mutex_lock(&g_detclock_cfg_mu);
+    if(g_detclock_cfg<0) {
+        const char* e=getenv("DM_DETCLOCK");
+        g_gdet_step=e?strtoull(e,0,0):0;
+        g_detclock_cfg=g_gdet_step>0;
+    }
+    int result=g_detclock_cfg;
+    pthread_mutex_unlock(&g_detclock_cfg_mu);
+    return result;
+#else
     static int c = -1; if (c < 0) { const char *e = getenv("DM_DETCLOCK"); g_gdet_step = e ? strtoull(e, 0, 0) : 0; c = g_gdet_step > 0; }
     return c;
+#endif
 }
 static uint64_t wall_guest_ns(void) { return atomic_load(&g_gfz) ? atomic_load(&g_gfrozen) : now_ns() - atomic_load(&g_glag); }
 uint64_t guest_ns(void) { return atomic_load(&g_gdet_on) ? atomic_load(&g_gdet) : wall_guest_ns(); }
@@ -84,6 +120,9 @@ void dm_guest_frame_tick(void) {
     atomic_fetch_add(&g_guest_frame, 1);
     if (!detclock_cfg()) return;
     if (!atomic_load(&g_gdet_on)) {
+#ifdef __ANDROID__
+        if(!gate_obs_present(OBS_UIMSG))die("DM_DETCLOCK requires the real UIMSG observation gate");
+#endif
         atomic_store(&g_gdet, wall_guest_ns()); atomic_store(&g_gdet_on, 1);
         void uimsg_subscribe(void (*)(const char *, const char *, const char *)); uimsg_subscribe(det_on_uimsg);
         LOG("DM_DETCLOCK：首次出图起客体时钟按出图推进，步长 %llu ns；进局时对齐到 2^52 ns", (unsigned long long)g_gdet_step); return;
@@ -100,6 +139,9 @@ static void guest_clock_freeze_apply(int on) {
 // otherwise "switch to background and back while the keyboard is up" would be released early by the unfreeze on returning to foreground
 static pthread_mutex_t g_gfz_mu = PTHREAD_MUTEX_INITIALIZER; static unsigned g_gfz_reasons;
 void guest_clock_freeze_for(int reason, int on) {
+#ifdef __ANDROID__
+    if(reason<0 || (unsigned)reason>=sizeof(g_gfz_reasons)*8u)return;
+#endif
     pthread_mutex_lock(&g_gfz_mu);
     if (on) g_gfz_reasons |= 1u << reason; else g_gfz_reasons &= ~(1u << reason);
     guest_clock_freeze_apply(g_gfz_reasons != 0);
@@ -123,3 +165,17 @@ HLE("getentropy", int, g_getentropy, void *p, size_t n) {
     for (size_t i = 0; i < n; i += 8) { uint64_t v = dm_entropy64(); memcpy((uint8_t *)p + i, &v, n - i < 8 ? n - i : 8); }
     return 0;
 }
+
+#ifdef __ANDROID__
+/* Diagnostics call only after all guest threads and present callbacks stop. */
+void dm_android_guest_clock_reset(void) {
+    pthread_mutex_lock(&g_gfz_mu);
+    pthread_mutex_lock(&g_detclock_cfg_mu);
+    atomic_store(&g_gfrozen,0);atomic_store(&g_glag,0);atomic_store(&g_gdet,0);
+    atomic_store(&g_guest_frame,0);atomic_store(&g_gfz,0);atomic_store(&g_gdet_on,0);
+    atomic_store(&g_detrng,0x5357444554524e47ull);atomic_store(&g_detrng_n,0);
+    g_gfz_reasons=0;g_detclock_cfg=-1;g_gdet_step=1;
+    pthread_mutex_unlock(&g_detclock_cfg_mu);
+    pthread_mutex_unlock(&g_gfz_mu);
+}
+#endif

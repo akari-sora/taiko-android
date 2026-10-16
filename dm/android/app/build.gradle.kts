@@ -14,8 +14,8 @@ android {
         applicationId = "org.d2rmobile.diagnostics"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0-phase0"
+        versionCode = 13
+        versionName = "0.13.0-dev"
         ndk { abiFilters += "arm64-v8a" }
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
     }

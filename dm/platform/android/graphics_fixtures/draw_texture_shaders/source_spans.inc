@@ -1,0 +1,2 @@
+case 0: out.control_offset=144; out.record_control_offset=144; out.record_bytes=2320; out.code_offset=0; out.code_bytes=144; out.c1_offset=144; out.c1_bytes=0; out.record_sha256=digest("79702dc4952ecae0f4d37bcc3f9447813577515e909f7845e1e1faece33112b1"); break;
+case 1: out.control_offset=208; out.record_control_offset=208; out.record_bytes=2384; out.code_offset=0; out.code_bytes=208; out.c1_offset=208; out.c1_bytes=0; out.record_sha256=digest("5f46e1f76eb2927486de70a8d919ec79eae85b21029004b432aeb1174d81638c"); break;

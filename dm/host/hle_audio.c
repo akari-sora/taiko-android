@@ -7,15 +7,46 @@
 //       iOS defaults to real audio output (the product must have sound), tests that want silence set DM_AUDIO=0 explicitly; Mac defaults to the silent sink (replay / gate checks are silent), DM_AUDIO=1 for real audio output.
 // The contents of AudioOut / AudioOutBuffer / AudioOutParameter are read and written only through the interfaces below; the host defines its own internal layout and only writes the front part of the structs.
 #include "hle.h"
+#ifdef __ANDROID__
+#include "../platform/android/audio_platform.h"
+#include "../platform/android/guest_memory.h"
+#include <errno.h>
+#include <semaphore.h>
+typedef DmAndroidAudioDevice *AudioUnit;
+typedef int OSStatus;
+typedef sem_t *dispatch_semaphore_t;
+#define DISPATCH_TIME_FOREVER 0
+static dispatch_semaphore_t dispatch_semaphore_create(unsigned value) {
+    sem_t *s = malloc(sizeof *s);
+    if (s && sem_init(s, 0, value)) { free(s); return NULL; }
+    return s;
+}
+static void dispatch_semaphore_signal(dispatch_semaphore_t s) { sem_post(s); }
+static void dispatch_semaphore_wait(dispatch_semaphore_t s, int forever) {
+    (void)forever; while (sem_wait(s) && errno == EINTR) {}
+}
+static void dispatch_release(dispatch_semaphore_t s) { sem_destroy(s); free(s); }
+static int AudioOutputUnitStart(AudioUnit a) { return dm_android_audio_device_start(a) ? 0 : -1; }
+static void AudioOutputUnitStop(AudioUnit a) { dm_android_audio_device_stop(a); }
+extern int dm_android_audio_focus_acquire(void) __attribute__((weak));
+extern void dm_android_audio_focus_release(void) __attribute__((weak));
+#else
 #include <AudioToolbox/AudioToolbox.h>
 #include <TargetConditionals.h>
 #include <dispatch/dispatch.h>
+#endif
 #include <stdatomic.h>
 #include <unistd.h>
 
 enum { FMT_PCM16 = 2, STATE_STARTED = 0, STATE_STOPPED = 1, RATE = 48000 };
 
 typedef struct { void *ptr; uint64_t cap, size; } gbuf;     // 写进客体 AudioOutBuffer 的前 24 字节 | The first 24 bytes written into the guest AudioOutBuffer
+#ifdef __ANDROID__
+typedef struct { gbuf pcm; gbuf *guest; } owned_audio_buffer;
+static void owned_audio_free(gbuf *buffer) {
+    if (buffer) { free(buffer->ptr); free((owned_audio_buffer *)buffer); }
+}
+#endif
 #define QMAX 64
 #define RELMAX QMAX                    // 已释放最多 = 在途缓冲数（游戏收回缓冲才能再追加），与待播同上限 | Released max = number of in-flight buffers (the game must take a buffer back before it can append again), same limit as pending
 typedef struct {
@@ -30,6 +61,11 @@ typedef struct {
     pthread_t null_th; _Atomic int null_run;
     dispatch_semaphore_t notify_sem;
     pthread_t notify_th; _Atomic int notify_run, notify_pending, notify_armed;
+#ifdef __ANDROID__
+    void *guest_out;
+    int focus_held;
+    _Atomic int closing;
+#endif
 } aout;
 
 // 打开中的输出登记表：前端生命周期（切后台）一次性暂停 / 恢复
@@ -89,6 +125,17 @@ static void pull(aout *a, uint8_t *dst, uint64_t n) {
 
 static _Atomic uint64_t g_render_calls;   // 声卡回调累计（生命周期验证：恢复后须继续增长） | Cumulative sound card callbacks (lifecycle verification: must keep growing after resume)
 uint64_t dm_audio_render_calls(void) { return atomic_load_explicit(&g_render_calls, memory_order_relaxed); }
+#ifdef __ANDROID__
+static void au_render(void *ctx, void *pcm, size_t bytes) {
+    atomic_fetch_add_explicit(&g_render_calls, 1, memory_order_relaxed);
+    pull(ctx, pcm, bytes);
+}
+static int au_open(aout *a) {
+    a->au = dm_android_audio_device_open(a->ch, au_render, a);
+    if (!a->au) LOG("Android AAudio open failed: channels=%d error=%d", a->ch, dm_android_audio_open_error());
+    return a->au != NULL;
+}
+#else
 static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) {
     (void)f; (void)ts; (void)bus; (void)frames;
     aout *a = ctx;
@@ -115,6 +162,7 @@ static void au_open(aout *a) {
         AudioUnitSetProperty(a->au, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb) ||
         AudioUnitInitialize(a->au)) die("AudioUnit 设置失败");
 }
+#endif
 // 静音接收端：每 5 ms 按 48 kHz 实时消耗
 // Silent sink: consumes in real time at 48 kHz every 5 ms
 static void *null_sink(void *p) {
@@ -126,7 +174,13 @@ static void *null_sink(void *p) {
     }
     return NULL;
 }
-static int real_audio(void) { const char *e = getenv("DM_AUDIO"); return e ? atoi(e) != 0 : TARGET_OS_IPHONE; }
+static int real_audio(void) {
+#ifdef __ANDROID__
+    return 1; // Backend refusal must never become successful silent playback.
+#else
+    const char *e = getenv("DM_AUDIO"); return e ? atoi(e) != 0 : TARGET_OS_IPHONE;
+#endif
+}
 
 // AudioOutParameter = { int32 sampleRate; uint16 channelCount; uint16 _r; ... }，0 = 系统默认（48 kHz / 2 声道）
 // AudioOutParameter = { int32 sampleRate; uint16 channelCount; uint16 _r; ... }, 0 = system default (48 kHz / 2 channels)
@@ -140,16 +194,35 @@ HLE_FORCE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventEPKcRKN
           Result, h_au_Open, void *g, void *ev, const char *name, const uint8_t *param) {
     int ch = *(const uint16_t *)(param + 4); int rate = *(const int32_t *)param;
     if (!ch) ch = 2;
+#ifdef __ANDROID__
+    if (ch < 1 || ch > 8 || (rate && rate != RATE)) return RES_FAIL;
+#else
     if (rate && rate != RATE) die("AudioOut 采样率 %d 不支持（只做 48 kHz）", rate);
+#endif
     aout *a = calloc(1, sizeof *a);
+#ifdef __ANDROID__
+    if (!a) return RES_FAIL;
+#endif
     pthread_mutex_init(&a->m, NULL); a->event = ev; a->ch = ch;
     atomic_init(&a->state, STATE_STOPPED);
     atomic_init(&a->q_head, 0); atomic_init(&a->q_tail, 0);
     atomic_init(&a->rel_head, 0); atomic_init(&a->rel_tail, 0);
     atomic_init(&a->null_run, 0); atomic_init(&a->notify_run, 1);
     atomic_init(&a->notify_pending, 0); atomic_init(&a->notify_armed, 0);
+#ifdef __ANDROID__
+    a->guest_out = g; atomic_init(&a->closing, 0);
+    if (!au_open(a)) { pthread_mutex_destroy(&a->m); free(a); return RES_FAIL; }
+#endif
     a->notify_sem = dispatch_semaphore_create(0);
+#ifdef __ANDROID__
+    if (!a->notify_sem) { dm_android_audio_device_close(a->au); pthread_mutex_destroy(&a->m); free(a); return RES_FAIL; }
+    if (pthread_create(&a->notify_th, NULL, event_notify, a)) {
+        dispatch_release(a->notify_sem); dm_android_audio_device_close(a->au);
+        pthread_mutex_destroy(&a->m); free(a); return RES_FAIL;
+    }
+#else
     pthread_create(&a->notify_th, NULL, event_notify, a);
+#endif
     if (ev) hle_bind_system_event(ev, 1);   // 缓冲释放事件：客体线程上绑内核事件（自动清除），之后由音频线程触发 | Buffer release event: bind a kernel event on the guest thread (auto-clear), afterwards signaled by the audio thread
     objmap_put(g, a);
     pthread_mutex_lock(&g_aos_lock);
@@ -158,26 +231,65 @@ HLE_FORCE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventEPKcRKN
     g_aos[slot] = a;
     pthread_mutex_unlock(&g_aos_lock);
     LOG("audio::OpenAudioOut %s 声道 %d %s", name ? name : "(默认)", ch, real_audio() ? "真出声" : "静音接收端");
+#ifndef __ANDROID__
     if (real_audio()) au_open(a);
+#endif
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn5audio13StartAudioOutEPNS0_8AudioOutE", "开始播放", Result, h_au_Start, void *g) {
     aout *a = ao(g);
+#ifdef __ANDROID__
+    pthread_mutex_lock(&g_aos_lock);
+    int already = atomic_load_explicit(&a->state, memory_order_acquire) == STATE_STARTED;
+    pthread_mutex_unlock(&g_aos_lock);
+    if (already) return RES_OK;
+    if (!dm_android_audio_focus_acquire || !dm_android_audio_focus_release || !dm_android_audio_focus_acquire()) return RES_FAIL;
+    pthread_mutex_lock(&g_aos_lock);
+    if (atomic_load(&a->closing) || g_suspended) {
+        pthread_mutex_unlock(&g_aos_lock); dm_android_audio_focus_release(); return RES_FAIL;
+    }
+    if (atomic_load_explicit(&a->state, memory_order_acquire) == STATE_STARTED) {
+        pthread_mutex_unlock(&g_aos_lock); dm_android_audio_focus_release(); return RES_OK;
+    }
+    atomic_store_explicit(&a->state, STATE_STARTED, memory_order_release);
+    if (!dm_android_audio_device_start(a->au)) {
+        dm_android_audio_status status;
+        if (dm_android_audio_device_status(a->au, &status)) LOG("Android AAudio start failed: error=%d", status.last_error);
+        atomic_store_explicit(&a->state, STATE_STOPPED, memory_order_release);
+        pthread_mutex_unlock(&g_aos_lock); dm_android_audio_focus_release(); return RES_FAIL;
+    }
+    a->focus_held = 1;
+    pthread_mutex_unlock(&g_aos_lock);
+#else
     pthread_mutex_lock(&a->m); int was = atomic_load_explicit(&a->state, memory_order_relaxed); atomic_store_explicit(&a->state, STATE_STARTED, memory_order_release); pthread_mutex_unlock(&a->m);
     if (was == STATE_STARTED) return RES_OK;
     if (a->au && !g_suspended) { if (AudioOutputUnitStart(a->au)) die("AudioUnit 启动失败"); }
     else { atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); }
+#endif
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn5audio12StopAudioOutEPNS0_8AudioOutE", "停止播放", void, h_au_Stop, void *g) {
     aout *a = ao(g);
+#ifdef __ANDROID__
+    pthread_mutex_lock(&g_aos_lock);
+    atomic_store_explicit(&a->state, STATE_STOPPED, memory_order_release);
+    dm_android_audio_device_stop(a->au);
+    if (atomic_exchange_explicit(&a->null_run, 0, memory_order_acq_rel)) pthread_join(a->null_th, NULL);
+    int focus = a->focus_held; a->focus_held = 0;
+    pthread_mutex_unlock(&g_aos_lock);
+    if (focus && dm_android_audio_focus_release) dm_android_audio_focus_release();
+#else
     pthread_mutex_lock(&a->m); int was = atomic_load_explicit(&a->state, memory_order_relaxed); atomic_store_explicit(&a->state, STATE_STOPPED, memory_order_release); pthread_mutex_unlock(&a->m);
     if (was != STATE_STARTED) return;
     pthread_mutex_lock(&g_aos_lock); int susp = g_suspended; pthread_mutex_unlock(&g_aos_lock);
     if (a->au && !susp) AudioOutputUnitStop(a->au);
     else { atomic_store_explicit(&a->null_run, 0, memory_order_release); pthread_join(a->null_th, NULL); }   // 静音接收端（含暂停期间接手的） | Silent sink (including one that took over during suspension)
+#endif
 }
 HLE_FORCE("_ZN2nn5audio13CloseAudioOutEPNS0_8AudioOutE", "关闭音频输出", void, h_au_Close, void *g) {
+#ifdef __ANDROID__
+    atomic_store(&ao(g)->closing, 1);
+#endif
     h_au_Stop(g);
     aout *a = objmap_del(g);
     atomic_store_explicit(&a->notify_run, 0, memory_order_release);
@@ -186,7 +298,13 @@ HLE_FORCE("_ZN2nn5audio13CloseAudioOutEPNS0_8AudioOutE", "关闭音频输出", v
     pthread_mutex_lock(&g_aos_lock);
     for (int i = 0; i < AOMAX; i++) if (g_aos[i] == a) g_aos[i] = NULL;
     pthread_mutex_unlock(&g_aos_lock);
+#ifdef __ANDROID__
+    dm_android_audio_device_close(a->au);
+    uint32_t reclaimed = atomic_load(&a->rel_head), appended = atomic_load(&a->q_tail);
+    for (uint32_t i = reclaimed; i != appended; ++i) owned_audio_free(a->q[i & (QMAX - 1)]);
+#else
     if (a->au) { AudioUnitUninitialize(a->au); AudioComponentInstanceDispose(a->au); }
+#endif
     dispatch_release(a->notify_sem);
     pthread_mutex_destroy(&a->m); free(a);
 }
@@ -202,6 +320,19 @@ HLE_FORCE("_ZN2nn5audio28GetAudioOutBufferDataPointerEPKNS0_14AudioOutBufferE", 
 HLE_FORCE("_ZN2nn5audio25GetAudioOutBufferDataSizeEPKNS0_14AudioOutBufferE", "缓冲数据大小", uint64_t, h_au_BufSize, const gbuf *b) { return b->size; }
 HLE_FORCE("_ZN2nn5audio20AppendAudioOutBufferEPNS0_8AudioOutEPNS0_14AudioOutBufferE", "追加待播缓冲", unsigned, h_au_Append, void *g, gbuf *b) {
     aout *a = ao(g);
+#ifdef __ANDROID__
+    gbuf snapshot;
+    if (atomic_load(&a->closing) || !b || !dm_android_guest_copy((uintptr_t)b, &snapshot, sizeof snapshot) ||
+        !snapshot.ptr || !snapshot.size || snapshot.size > snapshot.cap ||
+        snapshot.size > DM_ANDROID_GUEST_COPY_MAX_BYTES || snapshot.size % (2u * (unsigned)a->ch)) return 0;
+    owned_audio_buffer *owned = calloc(1, sizeof *owned);
+    if (!owned) return 0;
+    owned->pcm = snapshot; owned->guest = b; owned->pcm.ptr = malloc((size_t)snapshot.size);
+    if (!owned->pcm.ptr || !dm_android_guest_copy((uintptr_t)snapshot.ptr, owned->pcm.ptr, (size_t)snapshot.size)) {
+        owned_audio_free(&owned->pcm); return 0;
+    }
+    b = &owned->pcm;
+#endif
     // 诊断开关 DM_AUDIO_DUMP=<文件>：游戏追加的每块 PCM 原样续写（16 位、48 kHz、声道数见 OpenAudioOut 日志，常见 6）。判「某个音播没播」用：
     // 拿原版音频对它做互相关（一档掉落音就这么验的）。只在设了变量时打开文件，没设时这里只多一次已缓存的判断
     // Diagnostic switch DM_AUDIO_DUMP=<file>: every PCM block the game appends is written out as is (16-bit, 48 kHz, channel count per the OpenAudioOut log, usually 6). Used to judge "did a given sound play or not":
@@ -210,10 +341,20 @@ HLE_FORCE("_ZN2nn5audio20AppendAudioOutBufferEPNS0_8AudioOutEPNS0_14AudioOutBuff
       if (df && b && b->ptr && b->size) fwrite(b->ptr, 1, (size_t)b->size, df); }
     pthread_mutex_lock(&a->m);
     uint32_t qt = atomic_load_explicit(&a->q_tail, memory_order_relaxed);
+#ifdef __ANDROID__
+    const uint32_t reclaimed = atomic_load_explicit(&a->rel_head, memory_order_acquire);
+    int ok = !atomic_load(&a->closing) && qt - reclaimed < QMAX;
+    for (uint32_t i = reclaimed; ok && i != qt; ++i)
+        if (((owned_audio_buffer *)a->q[i & (QMAX - 1)])->guest == owned->guest) ok = 0;
+#else
     uint32_t qh = atomic_load_explicit(&a->q_head, memory_order_acquire);
     int ok = qt - qh < QMAX;
+#endif
     if (ok) { a->q[qt & (QMAX - 1)] = b; atomic_store_explicit(&a->q_tail, qt + 1, memory_order_release); }
     pthread_mutex_unlock(&a->m);
+#ifdef __ANDROID__
+    if (!ok) owned_audio_free(b);
+#endif
     return ok;      // bool：队列满时 false（真机同样有上限） | bool: false when the queue is full (the real device has a limit too)
 }
 HLE_FORCE("_ZN2nn5audio25GetReleasedAudioOutBufferEPNS0_8AudioOutE", "取已播完的缓冲；没有则 NULL", gbuf *, h_au_Released, void *g) {
@@ -222,6 +363,9 @@ HLE_FORCE("_ZN2nn5audio25GetReleasedAudioOutBufferEPNS0_8AudioOutE", "取已播�
     uint32_t rr = atomic_load_explicit(&a->rel_head, memory_order_relaxed);
     uint32_t rw = atomic_load_explicit(&a->rel_tail, memory_order_acquire);
     if (rr != rw) { b = a->rel[rr & (RELMAX - 1)]; atomic_store_explicit(&a->rel_head, rr + 1, memory_order_release); }
+#ifdef __ANDROID__
+    if (b) { gbuf *guest = ((owned_audio_buffer *)b)->guest; owned_audio_free(b); b = guest; }
+#endif
     pthread_mutex_unlock(&a->m);
     return b;
 }
@@ -251,3 +395,40 @@ void dm_audio_suspend(int on) {
     }
     pthread_mutex_unlock(&g_aos_lock);
 }
+
+#ifdef __ANDROID__
+static pthread_mutex_t g_audio_reasons_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned g_audio_suspend_reasons;
+int dm_android_audio_out_status(const void *guest_out, dm_android_audio_status *status, int *suspended) {
+    if (!guest_out || !status || !suspended) return 0;
+    int found = 0;
+    pthread_mutex_lock(&g_aos_lock);
+    for (int i = 0; i < AOMAX; ++i) if (g_aos[i] && g_aos[i]->guest_out == guest_out && !atomic_load(&g_aos[i]->closing)) {
+        found = dm_android_audio_device_status(g_aos[i]->au, status);
+        *suspended = g_suspended;
+        break;
+    }
+    pthread_mutex_unlock(&g_aos_lock);
+    return found;
+}
+void dm_android_audio_set_suspended(unsigned reason, int on) {
+    if (reason < 1 || reason > 2) return;
+    pthread_mutex_lock(&g_audio_reasons_lock);
+    if (on) g_audio_suspend_reasons |= 1u << reason;
+    else g_audio_suspend_reasons &= ~(1u << reason);
+    dm_audio_suspend(g_audio_suspend_reasons != 0);
+    pthread_mutex_unlock(&g_audio_reasons_lock);
+}
+void dm_android_audio_shutdown(void) {
+    // Caller owns guest quiescence. Stop/join output and notifier callbacks
+    // while their real SystemEvent bindings and the runtime still exist.
+    for (;;) {
+        pthread_mutex_lock(&g_aos_lock);
+        void *guest = NULL;
+        for (int i = 0; i < AOMAX; ++i) if (g_aos[i]) { guest = g_aos[i]->guest_out; break; }
+        pthread_mutex_unlock(&g_aos_lock);
+        if (!guest) break;
+        h_au_Close(guest);
+    }
+}
+#endif

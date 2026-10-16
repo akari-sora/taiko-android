@@ -6,24 +6,35 @@
 // State objects (Blend / Color / ... 4–0x18 bytes) are small structs the game copies by value; their layout is packed in place with bit-fields.
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 #include "nvn.h"
 #include "nvn_tex.h"
 
 #define MAGIC(a, b, c, d) ((uint32_t)(a) | (uint32_t)(b) << 8 | (uint32_t)(c) << 16 | (uint32_t)(d) << 24)
-#define FITS(T, H) _Static_assert(sizeof(T) <= sizeof(H), #T " 超出 " #H " 的保留大小")
+#ifdef __cplusplus
+#define FITS(T, H) static_assert(sizeof(T) <= sizeof(H), #T " exceeds " #H)
+#else
+#define FITS(T, H) _Static_assert(sizeof(T) <= sizeof(H), #T " exceeds " #H)
+#endif
 
 typedef struct { uint32_t flags; } dev_builder_t;                       FITS(dev_builder_t, NVNdeviceBuilder);
 typedef struct { uint32_t magic, flags, origin, depth_mode; void *dbg_cb, *dbg_data; } dev_t_;  FITS(dev_t_, NVNdevice);
 
 typedef struct { NVNdevice *dev; uint32_t flags; uint64_t cmd_sz, comp_sz, ctl_sz, flush; void *mem; uint64_t mem_sz; } queue_builder_t;
 FITS(queue_builder_t, NVNqueueBuilder);
-typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; } queue_t;                 FITS(queue_t, NVNqueue);
+// Keep the original magic/device/submit prefix. Sticky failures live in the
+// queue's existing opaque storage, so queue count needs no shared registry or
+// allocation and a queue address reused by Initialize starts clean.
+typedef struct {
+    uint32_t magic; NVNdevice *dev; uint64_t submits;
+    uint32_t error_code, error_operation; char error_reason[512];
+} queue_t;                                                                                 FITS(queue_t, NVNqueue);
 
 typedef struct { NVNdevice *dev; void *mem; uint64_t size; uint32_t flags; } pool_builder_t;  FITS(pool_builder_t, NVNmemoryPoolBuilder);
 typedef struct { uint32_t magic, flags; uint8_t *mem; uint64_t size; } pool_t;                FITS(pool_t, NVNmemoryPool);
 
-typedef struct { const pool_t *pool; int64_t off; int32_t n; } dpool_t;                       // 贴图 / 采样器描述符池 | Texture / sampler descriptor pool
+typedef struct { const pool_t *pool; int64_t off; int32_t n; uint64_t serial; } dpool_t;                       // 贴图 / 采样器描述符池 | Texture / sampler descriptor pool
 FITS(dpool_t, NVNtexturePool); FITS(dpool_t, NVNsamplerPool);
 
 typedef struct {
@@ -41,9 +52,15 @@ FITS(view_t, NVNtextureView);
 // Sampler parameters (one copy shared by builder and object)
 typedef struct { uint8_t minf, magf, ws, wt, wr, cmp_mode, cmp_func; float lod_min, lod_max, lod_bias, aniso, border[4]; } samp_par;   // 枚举值都 < 256 | Enum values are all < 256
 typedef struct { NVNdevice *dev; samp_par p; } samp_builder_t;                                FITS(samp_builder_t, NVNsamplerBuilder);
-typedef struct { uint32_t magic; samp_par p; } samp_t;                                        FITS(samp_t, NVNsampler);
+typedef struct { uint32_t magic; samp_par p; uint32_t serial; } samp_t;                                        FITS(samp_t, NVNsampler);
 
-typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; } prog_t;     FITS(prog_t, NVNprogram);   // serial：回放层解析结果的表键 | serial: table key for the replay layer's resolved result
+typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial, generation; } prog_t;
+FITS(prog_t, NVNprogram);
+#ifdef __cplusplus
+static_assert(offsetof(prog_t, serial)==104 && offsetof(prog_t, generation)==112 && sizeof(prog_t)==120, "program ABI2 layout");
+#else
+_Static_assert(offsetof(prog_t, serial)==104 && offsetof(prog_t, generation)==112 && sizeof(prog_t)==120, "program ABI2 layout");
+#endif
 
 typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;                            FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
@@ -103,6 +120,15 @@ typedef struct { int32_t first, n; float v[16][6]; } p_viewports;          // x,
 typedef struct { int32_t x, y, w, h; } p_scissor;
 typedef struct { float n, f; } p_depth_range;
 typedef struct { const prog_t *prog; int32_t stages; } p_bind_program;
+// ABI2 binds carry a by-value tail. prog points exactly to this record's tail;
+// replay copies it and acquires core authority before any backend work.
+typedef struct { p_bind_program bind; prog_t snapshot; } p_bind_program_owned;
+FITS(p_bind_program, p_bind_program_owned);
+#ifdef __cplusplus
+static_assert(sizeof(NVNprogram)==0xc0 && sizeof(p_bind_program)==16 && offsetof(p_bind_program_owned,snapshot)==16 && sizeof(p_bind_program_owned)==136, "program record ABI2 layout");
+#else
+_Static_assert(sizeof(NVNprogram)==0xc0 && sizeof(p_bind_program)==16 && offsetof(p_bind_program_owned,snapshot)==16 && sizeof(p_bind_program_owned)==136, "program record ABI2 layout");
+#endif
 typedef struct { int32_t kind; uint8_t bytes[0x18]; } p_bind_state;      // kind：0 blend 1 color 2 chmask 3 ms 4 poly 5 ds
 typedef struct { int32_t first, n; uint32_t st[16]; } p_bind_vattr;
 typedef struct { int32_t first, n; vs_st st[16]; } p_bind_vstream;
@@ -115,8 +141,15 @@ typedef struct { int32_t prim, first, count; } p_draw;
 typedef struct { int32_t prim, itype, count, base_vertex, base_instance, instances; uint64_t ibuf; } p_draw_idx;
 typedef struct { int32_t x, y, z; uint64_t caller; } p_dispatch;   // caller：游戏调用点返回地址（定位派发者） | caller: return address of the game call site (to locate the dispatcher)
 typedef struct { const dpool_t *pool; } p_set_pool;
+typedef struct { p_set_pool bind; dpool_t snapshot; } p_set_pool_owned;
+#ifdef __cplusplus
+static_assert(offsetof(dpool_t,serial)==24 && sizeof(dpool_t)==32 && offsetof(samp_t,serial)==44 && sizeof(samp_t)==48 && offsetof(p_set_pool_owned,snapshot)==8 && sizeof(p_set_pool_owned)==40, "descriptor ABI4 layout");
+#else
+_Static_assert(offsetof(dpool_t,serial)==24 && sizeof(dpool_t)==32 && offsetof(samp_t,serial)==44 && sizeof(samp_t)==48 && offsetof(p_set_pool_owned,snapshot)==8 && sizeof(p_set_pool_owned)==40, "descriptor ABI4 layout");
+#endif
+// B2T source / T2B destination share the buffer-address field named src.
 typedef struct { uint64_t src; const tex_t *tex; view_t view; uint8_t has_view; NVNcopyRegion r; int32_t flags; } p_copy_b2t;
-typedef struct { const tex_t *src, *dst; view_t sv, dv; uint8_t has_sv, has_dv; NVNcopyRegion sr, dr; int32_t flags; } p_copy_t2t;   // T2B 复用：src 存目标缓冲地址 | Reused for T2B: src stores the destination buffer address
+typedef struct { const tex_t *src, *dst; view_t sv, dv; uint8_t has_sv, has_dv; NVNcopyRegion sr, dr; int32_t flags; } p_copy_t2t;
 typedef struct { const tex_t *tex; view_t view; uint8_t has_view, is_uint; NVNcopyRegion r; int32_t mask; union { float f[4]; uint32_t u[4]; } c; } p_clear_tex;
 typedef struct { int64_t stride; } p_copy_stride;
 typedef struct { float rgba[4]; } p_blend_color;
@@ -174,3 +207,8 @@ void mtl_prog_release(prog_t *p);
 // 新序号（> 0，全局递增）
 // New serial (> 0, globally increasing)
 uint64_t nvn_new_serial(void);
+
+#if defined(__APPLE__)
+// Scoped pool preflight/apply is serialized by the Apple submit admission.
+// nvn_result is declared in nvn_backend.h, so this internal seam is declared there.
+#endif

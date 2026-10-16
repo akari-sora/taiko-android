@@ -37,6 +37,15 @@ void dm_host_preload_start(int argc, char **argv);
 // The host converts to the panel coordinates the game reads, 1280x720 (x·1280, y·720, the way main 0x1b65260 reads them), and latches short taps (a down and up between two reads is reported at least once). May be called from any thread.
 typedef struct { uint32_t id; float x, y; } dm_touch;
 void dm_touch_set(const dm_touch *t, int n);
+// 系统取消 / 失焦：清掉持有与尚未采样的 Start，不合成松手动作；采样号与时钟连续。
+// System cancellation / focus loss: discard held and pending Start states;
+// synthesize no release action. Sampling and the touch clock stay continuous.
+void dm_touch_cancel(void);
+// Cancel one stable slot, retaining the other fingers (e.g. palm rejection).
+void dm_touch_cancel_finger(uint32_t id);
+// 客体已停止后的复位；清触点并重置采样号与时钟，不可拿它当运行中的普通松手。
+// Quiescent guest teardown reset, including sampling and the touch clock.
+void dm_touch_reset(void);
 
 // 存档未保存（宿主 hle_fs.c 调；iOS 前端写同名强实现弹原生提示「存储空间不足，进度未保存」，缺省弱实现只记日志）。
 // 时机：游戏一次存档事务（两次 Commit 之间）里有存档写失败（盘满等），这次 Commit 被拒、已提交的旧档不变时，每个被拒的事务调一次；

@@ -5,10 +5,29 @@
 // Not cut: the getters of Friend / Profile / FriendPresence and the constructors of Friend / Profile / UserPresence (they only read and write the game's own objects and do not go through the service).
 // Return convention: Result returns RES_FAIL; bool returns false; event pointers get a SystemEvent that is bound to a kernel event and never fires.
 #include "hle.h"
+#if defined(__ANDROID__)
+#include "../platform/android/service_platform.h"
+#endif
 
 // 永不触发的通知事件（GetSystemEvent 类返回指针；首次在客体线程上绑定）
 // Notification event that never fires (GetSystemEvent-style calls return a pointer; bound on the guest thread on first use)
 static _Alignas(16) uint8_t g_ev_notify[0x100], g_ev_invite[0x100];
+#if defined(__ANDROID__)
+void dm_android_friends_services_reset(void) {
+    memset(g_ev_notify, 0, sizeof g_ev_notify);
+    memset(g_ev_invite, 0, sizeof g_ev_invite);
+}
+int dm_android_friends_services_query_memory(uint64_t address, uint64_t* base, size_t* size, unsigned* flags) {
+    const uint8_t* buffers[] = { g_ev_notify, g_ev_invite };
+    for (unsigned i = 0; i < sizeof buffers / sizeof *buffers; ++i) {
+        const uint64_t start = (uint64_t)(uintptr_t)buffers[i];
+        if (address >= start && address - start < sizeof g_ev_notify) {
+            *base = start; *size = sizeof g_ev_notify; *flags = 3; return 1;
+        }
+    }
+    return 0;
+}
+#endif
 static void *quiet_event(uint8_t *ev) { hle_bind_system_event(ev, 0); return ev; }
 
 HLE_FORCE("_ZN2nn7friends10InitializeEv", "连 friends 服务（剪）", void, h_fr_Initialize, void) {}

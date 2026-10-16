@@ -7,6 +7,53 @@
 #include "hle.h"
 #include <stdatomic.h>
 #include <time.h>
+#if defined(__ANDROID__)
+#include "../platform/android/service_platform.h"
+#include "../platform/android/kernel_platform.h"
+#include <errno.h>
+static _Atomic int64_t g_fixed_time = -2;
+static _Atomic int g_seed_once, g_calendar_once;
+struct owned_zone { struct owned_zone* next; size_t bytes; char name[]; };
+static _Thread_local struct tm g_localtime;
+static pthread_key_t g_zone_key;
+static pthread_once_t g_zone_once = PTHREAD_ONCE_INIT;
+static void free_zones(void* value) {
+    struct owned_zone* zone = value;
+    while (zone) { struct owned_zone* next = zone->next; free(zone); zone = next; }
+}
+static void create_zone_key(void) {
+    if (pthread_key_create(&g_zone_key, free_zones)) die("time: owned time zone key allocation failed");
+}
+
+static module_t* main_module(void) {
+    for (int i = 0; i < g_nmod; ++i) if (!strcmp(g_mod[i].name, "main")) return &g_mod[i];
+    return NULL;
+}
+static int read_main_text(module_t* main, uint64_t address, uint32_t* word) {
+    if (!main || address < (uint64_t)(uintptr_t)main->base) return 0;
+    uint64_t off = address - (uint64_t)(uintptr_t)main->base, base;
+    size_t size; unsigned flags;
+    if (off > main->text_end || main->text_end - off < sizeof *word ||
+        !dm_android_host_query_memory(address, &base, &size, &flags) || (flags & 5) != 5 ||
+        address < base || address - base > size || size - (address - base) < sizeof *word) return 0;
+    memcpy(word, (const void*)(uintptr_t)address, sizeof *word); return 1;
+}
+static int own_timezone(struct tm* value) {
+    if (pthread_once(&g_zone_once, create_zone_key)) { errno = ENOMEM; return 0; }
+    const char* name = value->tm_zone ? value->tm_zone : "UTC";
+    struct owned_zone* head = pthread_getspecific(g_zone_key);
+    for (struct owned_zone* zone = head; zone; zone = zone->next) {
+        if (!strcmp(zone->name, name)) { value->tm_zone = zone->name; return 1; }
+    }
+    size_t bytes = strlen(name) + 1;
+    if (bytes > SIZE_MAX - sizeof(struct owned_zone)) { errno = ENOMEM; return 0; }
+    struct owned_zone* zone = malloc(sizeof *zone + bytes);
+    if (!zone) return 0;
+    zone->next = head; zone->bytes = bytes; memcpy(zone->name, name, bytes);
+    if (pthread_setspecific(g_zone_key, zone)) { free(zone); errno = ENOMEM; return 0; }
+    value->tm_zone = zone->name; return 1;
+}
+#endif
 
 typedef struct { int16_t year; int8_t month, day, hour, minute, second; int8_t pad; } CalendarTime;
 typedef struct { uint32_t wday, yday; char tzname[8]; uint32_t dst; int32_t offset; } CalendarAdditionalInfo;
@@ -22,26 +69,52 @@ typedef struct { uint32_t wday, yday; char tzname[8]; uint32_t dst; int32_t offs
 // This SDK's libc time() is uptime (clock_gettime(0) → __nnmusl_ClockGetTime → GetSystemTick), not wall clock;
 // the other 17 time() call sites in main are left alone and forwarded unchanged to the SDK's own time().
 static int64_t fixed_time(void) {
+#if defined(__ANDROID__)
+    int64_t v = atomic_load(&g_fixed_time);
+    if (v == -2) {
+        const char* e = getenv("DM_FIXED_TIME"); v = e ? strtoll(e, 0, 0) : -1;
+        atomic_store(&g_fixed_time, v);
+        if (v >= 0) LOG("DM_FIXED_TIME=%lld：用户时钟与建局 time()（main 0x3509a4）返回定值", (long long)v);
+    }
+    return v;
+#else
     static int64_t v = -2;
     if (v == -2) { const char *e = getenv("DM_FIXED_TIME"); v = e ? strtoll(e, 0, 0) : -1;
                    if (v >= 0) LOG("DM_FIXED_TIME=%lld：用户时钟与建局 time()（main 0x3509a4）返回定值", (long long)v); }
     return v;
+#endif
 }
 HLE_FORCE("time", "按返回点认出建局种子那一处（DM_FIXED_TIME）；其余原样转调 SDK 的 time()", int64_t, h_time_time, int64_t *t) {
     uint64_t lr = (uint64_t)__builtin_return_address(0);
+#if defined(__ANDROID__)
+    // Bindings and images can change between quiescent runtime sessions. Never
+    // cache either pointer beyond this invocation, or re-resolve via HLE_FORCE.
+    int64_t (*sdk_time)(int64_t *) = NULL; uint64_t seed_ret = 0;
+#else
     static int64_t (*sdk_time)(int64_t *); static uint64_t seed_ret;
+#endif
     if (!sdk_time) {
         module_t *ms = NULL, *mm = NULL;
         for (int i = 0; i < g_nmod; i++) { if (!strcmp(g_mod[i].name, "sdk")) ms = &g_mod[i]; if (!strcmp(g_mod[i].name, "main")) mm = &g_mod[i]; }
         void *f = ms ? module_sym(ms, "time") : NULL; if (!f) die("SDK 里找不到 time");
-        uint32_t w = mm ? *(uint32_t *)(mm->base + 0x3509a0) : 0;
+        uint32_t w = 0;
+#if defined(__ANDROID__)
+        if (mm && (uintptr_t)mm->base <= UINT64_MAX - 0x3509a0)
+            read_main_text(mm, (uint64_t)(uintptr_t)mm->base + 0x3509a0, &w);
+#else
+        w = mm ? *(uint32_t *)(mm->base + 0x3509a0) : 0;
+#endif
         if ((w & 0xfc000000) == 0x94000000) seed_ret = (uint64_t)mm->base + 0x3509a4;               // bl time（构建 db0507f3…；改写器会改跳转目标，只认 bl 本身） | bl time (build db0507f3…; the rewriter changes the branch target, so only the bl itself is matched)
         else if (fixed_time() >= 0) LOG("【红】DM_FIXED_TIME：main 0x3509a0 不是预期的 bl time（%#x），建局 time() 未固定", w);
         sdk_time = (int64_t (*)(int64_t *))f;
     }
     int64_t ft = fixed_time();
     if (ft >= 0 && lr == seed_ret) {
+#if defined(__ANDROID__)
+        if (!atomic_exchange(&g_seed_once, 1)) LOG("DM_FIXED_TIME：建局 time() 返回 %lld", (long long)ft);
+#else
         static int once; if (!once++) LOG("DM_FIXED_TIME：建局 time() 返回 %lld", (long long)ft);
+#endif
         if (t) *t = ft; return ft;
     }
     return sdk_time(t);
@@ -61,24 +134,47 @@ HLE_FORCE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE
 _Atomic int64_t g_dm_tz_time;
 _Atomic uint64_t g_dm_tz_live_ns;
 static int tz_site(uint64_t lr) {   // 只在强制期间才判，每次读返回点后 8 条指令，不缓存（多线程都会取时钟） | Checked only while forcing is active, reading the 8 instructions after the return point each time, no caching (several threads read the clock)
+#if defined(__ANDROID__)
+    module_t* main = main_module();
+    uint64_t b = main ? (uint64_t)(uintptr_t)main->base : 0;
+    uint32_t instruction;
+    if (!read_main_text(main, lr, &instruction)) return 0;
+#else
     static _Atomic uint64_t base; uint64_t b = atomic_load(&base);
     if (!b) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) b = (uint64_t)g_mod[i].base; atomic_store(&base, b); }
     if (!b || lr < b) return 0;
+#endif
     uint64_t off = lr - b; if (off > 0x58f1e0 && off < 0x591440) return 1;
-    for (int k = 0; k < 8; k++) { uint32_t w = *(const uint32_t *)(uintptr_t)(lr + 4 * k);
+    for (int k = 0; k < 8; k++) { uint32_t w;
+#if defined(__ANDROID__)
+        if (lr > UINT64_MAX - 4u * (unsigned)k || !read_main_text(main, lr + 4u * (unsigned)k, &w)) break;
+#else
+        w = *(const uint32_t *)(uintptr_t)(lr + 4 * k);
+#endif
         if ((w & 0xfc000000) == 0x94000000) { int64_t imm = w & 0x3ffffff; if (imm & 0x2000000) imm -= 1 << 26; if (off + 4 * k + imm * 4 == 0x58f310) return 1; } }
     return 0;
 }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock3nowEv", "用户时钟 → 宿主 time()；首领连战强制地带时恐怖地带那几处另返回", int64_t, h_time_now, void) {
     int64_t tz = atomic_load(&g_dm_tz_time);
+#if defined(__ANDROID__)
+    if (tz && now_ns() < atomic_load(&g_dm_tz_live_ns) && tz_site((uint64_t)__builtin_return_address(0))) return tz;
+#else
     if (tz && (uint64_t)clock_gettime_nsec_np(CLOCK_MONOTONIC) < atomic_load(&g_dm_tz_live_ns) && tz_site((uint64_t)__builtin_return_address(0))) return tz;
+#endif
     int64_t ft = fixed_time(); return ft >= 0 ? ft : time(NULL); }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock9to_time_tERKNSt3__16chrono10time_pointINS0_17SystemClockTraitsENS3_8durationIlNS2_5ratioILl1ELl1EEEEEEE",
           "SDK 实现与 now() 配套，一并接管", int64_t, h_time_to_time_t, const int64_t *tp) { return *tp; }
 HLE_FORCE("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditionalInfoERKNS0_9PosixTimeE",
           "连 time 服务的时区规则；改用宿主 localtime_r", Result, h_time_ToCalendarTime, CalendarTime *ct, CalendarAdditionalInfo *ai, const int64_t *pt) {
-    time_t t = *pt; struct tm tm; localtime_r(&t, &tm);
-    static int once; if (!once++) LOG("ToCalendarTime：首次换算 %lld → %04d-%02d-%02d %02d:%02d（时区 %s，偏移 %ld 秒）", (long long)t, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_zone ? tm.tm_zone : "?", (long)tm.tm_gmtoff);
+    time_t t = *pt; struct tm tm;
+#if defined(__ANDROID__)
+    if (!localtime_r(&t, &tm)) return RES_FAIL;
+    int first = !atomic_exchange(&g_calendar_once, 1);
+#else
+    localtime_r(&t, &tm);
+    static int once; int first = !once++;
+#endif
+    if (first) LOG("ToCalendarTime：首次换算 %lld → %04d-%02d-%02d %02d:%02d（时区 %s，偏移 %ld 秒）", (long long)t, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_zone ? tm.tm_zone : "?", (long)tm.tm_gmtoff);
     if (ct) *ct = (CalendarTime){(int16_t)(tm.tm_year + 1900), (int8_t)(tm.tm_mon + 1), (int8_t)tm.tm_mday, (int8_t)tm.tm_hour, (int8_t)tm.tm_min, (int8_t)tm.tm_sec, 0};
     if (ai) { memset(ai, 0, sizeof *ai); ai->wday = tm.tm_wday; ai->yday = tm.tm_yday; strlcpy(ai->tzname, tm.tm_zone ? tm.tm_zone : "UTC", sizeof ai->tzname);
               ai->dst = tm.tm_isdst > 0; ai->offset = (int32_t)tm.tm_gmtoff; }
@@ -92,6 +188,61 @@ HLE_FORCE("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditi
 // main+0xb04d34 calling localtime and then strftime, and was off by 8 hours). The SDK on a real Switch converts by the system time zone, so only following the host system time zone here is consistent;
 // the host TZ normally = the system time zone, and is pinned to UTC only for deterministic comparison with DM_FIXED_TIME (main.c). The struct tm layout is the same on both sides (9 ints, long offset, time zone name pointer).
 // gmtime / gmtime_r / timegm are UTC anyway and are not taken over. The same-named pass-through entries in hle_table.c only take effect when the symbol has no definition (the SDK defines them), hence HLE_FORCE
-HLE_FORCE("localtime", "本地时刻 → 宿主 localtime（跟系统时区）", struct tm *, h_localtime, const int64_t *t) { time_t v = (time_t)*t; return localtime(&v); }
-HLE_FORCE("localtime_r", "本地时刻 → 宿主 localtime_r（跟系统时区）", struct tm *, h_localtime_r, const int64_t *t, struct tm *out) { time_t v = (time_t)*t; return localtime_r(&v, out); }
-HLE_FORCE("mktime", "本地日历 → 绝对秒，宿主 mktime（跟系统时区）", int64_t, h_mktime, struct tm *tm) { return (int64_t)mktime(tm); }
+HLE_FORCE("localtime", "本地时刻 → 宿主 localtime（跟系统时区）", struct tm *, h_localtime, const int64_t *t) {
+    time_t v = (time_t)*t;
+#if defined(__ANDROID__)
+    if (!localtime_r(&v, &g_localtime) || !own_timezone(&g_localtime)) return NULL;
+    return &g_localtime;
+#else
+    return localtime(&v);
+#endif
+}
+HLE_FORCE("localtime_r", "本地时刻 → 宿主 localtime_r（跟系统时区）", struct tm *, h_localtime_r, const int64_t *t, struct tm *out) {
+    time_t v = (time_t)*t; struct tm* result = localtime_r(&v, out);
+#if defined(__ANDROID__)
+    if (result && !own_timezone(result)) return NULL;
+#endif
+    return result;
+}
+HLE_FORCE("mktime", "本地日历 → 绝对秒，宿主 mktime（跟系统时区）", int64_t, h_mktime, struct tm *tm) {
+#if defined(__ANDROID__)
+    int saved_errno = errno; errno = 0;
+    int64_t result = (int64_t)mktime(tm);
+    int call_errno = errno;
+    // A failed conversion may leave tm_zone untouched (guest input), so only
+    // copy the host's time zone after a successful conversion. -1 with no
+    // errno is also a valid instant immediately before the Unix epoch.
+    if (result == -1 && call_errno) return result;
+    if (!own_timezone(tm)) return -1;
+    errno = call_errno ? call_errno : saved_errno;
+#else
+    int64_t result = (int64_t)mktime(tm);
+#endif
+    return result;
+}
+#if defined(__ANDROID__)
+void dm_android_time_services_reset(void) {
+    atomic_store(&g_fixed_time, -2); atomic_store(&g_seed_once, 0); atomic_store(&g_calendar_once, 0);
+    atomic_store(&g_dm_tz_time, 0); atomic_store(&g_dm_tz_live_ns, 0);
+    memset(&g_localtime, 0, sizeof g_localtime);
+    if (!pthread_once(&g_zone_once, create_zone_key)) {
+        struct owned_zone* zones = pthread_getspecific(g_zone_key);
+        if (pthread_setspecific(g_zone_key, NULL)) die("time: owned time zone reset failed");
+        free_zones(zones);
+    }
+}
+int dm_android_time_services_query_memory(uint64_t address, uint64_t* base, size_t* size, unsigned* flags) {
+    uint64_t start = (uint64_t)(uintptr_t)&g_localtime;
+    if (address >= start && address - start < sizeof g_localtime) {
+        *base = start; *size = sizeof g_localtime; *flags = 3; return 1;
+    }
+    if (pthread_once(&g_zone_once, create_zone_key)) return 0;
+    for (struct owned_zone* zone = pthread_getspecific(g_zone_key); zone; zone = zone->next) {
+        start = (uint64_t)(uintptr_t)zone->name;
+        if (address >= start && address - start < zone->bytes) {
+            *base = start; *size = zone->bytes; *flags = 1; return 1;
+        }
+    }
+    return 0;
+}
+#endif

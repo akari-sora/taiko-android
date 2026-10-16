@@ -1,0 +1,846 @@
+{
+  "format": "DMAMOD01",
+  "abi": 1145913601,
+  "module_order": [
+    "main",
+    "sdk",
+    "extra"
+  ],
+  "status": "prepared",
+  "modules": [
+    {
+      "name": "main",
+      "source_sha256": "9478a58fccf497bbe3495a67d1ca7c004ac153a7f291e3d9cabe51b56f28dce4",
+      "build_id": "a261945b02dc2deebbe55f0b7ed7784f3a888053de47ac3c5626d8f1b289c3cd",
+      "image_sha256": "75fc53b393234cffa0bc4858797613d0479e59e4dbb4162077bfb024307c9dcd",
+      "package_sha256": "5ca925cf41da3a420ca4a649168f9930c841a293f8a2948cdfafe555e109ad38",
+      "source_size": 12544,
+      "original_image_size": 40960,
+      "package_size": 50000,
+      "compression_flags": 0,
+      "sections": [
+        {
+          "name": "text",
+          "offset": 0,
+          "size": 4096
+        },
+        {
+          "name": "ro",
+          "offset": 16384,
+          "size": 4096
+        },
+        {
+          "name": "data",
+          "offset": 32768,
+          "size": 4096
+        }
+      ],
+      "bss_size": 4096,
+      "symbol_count": 13,
+      "string_size": 145,
+      "symbol_count_source": "DT_HASH",
+      "init_addresses": [
+        360
+      ],
+      "imports": [
+        {
+          "name": "extra_global",
+          "value": 0,
+          "size": 0,
+          "binding": 1,
+          "kind": 1,
+          "section": 0,
+          "visibility": 0
+        },
+        {
+          "name": "force_override",
+          "value": 0,
+          "size": 0,
+          "binding": 1,
+          "kind": 2,
+          "section": 0,
+          "visibility": 0
+        },
+        {
+          "name": "record_boot",
+          "value": 0,
+          "size": 0,
+          "binding": 1,
+          "kind": 2,
+          "section": 0,
+          "visibility": 0
+        },
+        {
+          "name": "record_init",
+          "value": 0,
+          "size": 0,
+          "binding": 1,
+          "kind": 2,
+          "section": 0,
+          "visibility": 0
+        },
+        {
+          "name": "sdk_call",
+          "value": 0,
+          "size": 0,
+          "binding": 1,
+          "kind": 2,
+          "section": 0,
+          "visibility": 0
+        },
+        {
+          "name": "sdk_global",
+          "value": 0,
+          "size": 0,
+          "binding": 1,
+          "kind": 1,
+          "section": 0,
+          "visibility": 0
+        }
+      ],
+      "exports": [
+        {
+          "name": "duplicate_value",
+          "value": 33152,
+          "size": 8,
+          "binding": 1,
+          "kind": 1,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "fixture_main",
+          "value": 256,
+          "size": 104,
+          "binding": 1,
+          "kind": 2,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "main_bss",
+          "value": 36864,
+          "size": 8,
+          "binding": 1,
+          "kind": 1,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "nnMain",
+          "value": 388,
+          "size": 32,
+          "binding": 1,
+          "kind": 2,
+          "section": 1,
+          "visibility": 0
+        }
+      ],
+      "relocations": [
+        {
+          "offset": 32776,
+          "kind": 1025,
+          "symbol": 12,
+          "addend": 0
+        },
+        {
+          "offset": 32784,
+          "kind": 257,
+          "symbol": 2,
+          "addend": 8
+        },
+        {
+          "offset": 32792,
+          "kind": 1027,
+          "symbol": 0,
+          "addend": 33024
+        },
+        {
+          "offset": 32816,
+          "kind": 257,
+          "symbol": 2,
+          "addend": -8
+        },
+        {
+          "offset": 32832,
+          "kind": 1026,
+          "symbol": 10,
+          "addend": 0
+        },
+        {
+          "offset": 32768,
+          "kind": 1026,
+          "symbol": 11,
+          "addend": 0
+        },
+        {
+          "offset": 32800,
+          "kind": 1026,
+          "symbol": 6,
+          "addend": 0
+        },
+        {
+          "offset": 32840,
+          "kind": 1026,
+          "symbol": 9,
+          "addend": 0
+        }
+      ],
+      "code_ranges": [
+        [
+          0,
+          4
+        ],
+        [
+          256,
+          420
+        ]
+      ],
+      "code_discovery": {
+        "roots": [
+          0,
+          256,
+          360,
+          388
+        ],
+        "function_extents": [
+          [
+            0,
+            4
+          ],
+          [
+            256,
+            360
+          ],
+          [
+            360,
+            388
+          ],
+          [
+            388,
+            420
+          ]
+        ],
+        "selected_words": 42,
+        "proven_indirect_sites": [
+          404,
+          272,
+          332,
+          376
+        ],
+        "address_taken_roots": [],
+        "proven_literal_ranges": [],
+        "indirect_memory_policy": "relocation-backed targets; reject discovered overlapping/unknown-alias writes and writable-image pointers passed to imports; trusted host ABI",
+        "stack_pointer_policy": "only bounded aligned immediate SP adjustments and SP-relative load/store writeback; arbitrary SP writes rejected",
+        "relocation_slots_clobbered_by_code": [],
+        "reachable_memory_writes": [
+          {
+            "instruction_offset": 348,
+            "range": [
+              36864,
+              36872
+            ]
+          }
+        ],
+        "rewrite_candidate_audit": {
+          "text_words": 1024,
+          "selected_candidates": [
+            276,
+            292,
+            304,
+            316,
+            320,
+            324,
+            336
+          ],
+          "verified_data_candidates": [],
+          "uncovered_candidates": []
+        }
+      },
+      "rewrite": {
+        "target": "android-arm64",
+        "abi": 1145913601,
+        "size": 49552,
+        "entry_offset": 0,
+        "fixups": [
+          {
+            "offset": 49544,
+            "helper": 1
+          }
+        ],
+        "gates": [],
+        "sites": [
+          {
+            "offset": 276,
+            "trampoline": 49152,
+            "instruction": "mov x18, x0"
+          },
+          {
+            "offset": 292,
+            "trampoline": 49204,
+            "instruction": "add x18, x18, x10"
+          },
+          {
+            "offset": 304,
+            "trampoline": 49256,
+            "instruction": "add x18, x18, x11"
+          },
+          {
+            "offset": 316,
+            "trampoline": 49308,
+            "instruction": "add x18, x18, x12"
+          },
+          {
+            "offset": 320,
+            "trampoline": 49360,
+            "instruction": "str x18, [sp, #0x10]"
+          },
+          {
+            "offset": 324,
+            "trampoline": 49424,
+            "instruction": "ldr x18, [sp, #0x10]"
+          },
+          {
+            "offset": 336,
+            "trampoline": 49488,
+            "instruction": "add x0, x0, x18"
+          }
+        ]
+      },
+      "unsupported": [],
+      "game_boot_status": "NOT_RUN"
+    },
+    {
+      "name": "sdk",
+      "source_sha256": "75d1af3c8619cd63badeb572ec63b47aedead70c3820ae13fe7a66ebf70586da",
+      "build_id": "49e33850ea079b6d488675a3bd84549f4f3d2835bbd1014061be022d43be50ff",
+      "image_sha256": "e32b943a2e8c470a8f16b4ee5cca90160d582e824e7655edbf04dd2e444eb229",
+      "package_sha256": "fbd876408dfd149e804a7d0a51e89b11f70303977c7ae3150c3c266a767e2a20",
+      "source_size": 1174,
+      "original_image_size": 40960,
+      "package_size": 49560,
+      "compression_flags": 7,
+      "sections": [
+        {
+          "name": "text",
+          "offset": 0,
+          "size": 4096
+        },
+        {
+          "name": "ro",
+          "offset": 16384,
+          "size": 4096
+        },
+        {
+          "name": "data",
+          "offset": 32768,
+          "size": 4096
+        }
+      ],
+      "bss_size": 4096,
+      "symbol_count": 22,
+      "string_size": 325,
+      "symbol_count_source": "DT_HASH",
+      "init_addresses": [
+        296
+      ],
+      "imports": [
+        {
+          "name": "extra_call",
+          "value": 0,
+          "size": 0,
+          "binding": 1,
+          "kind": 2,
+          "section": 0,
+          "visibility": 0
+        },
+        {
+          "name": "record_boot",
+          "value": 0,
+          "size": 0,
+          "binding": 1,
+          "kind": 2,
+          "section": 0,
+          "visibility": 0
+        },
+        {
+          "name": "record_init",
+          "value": 0,
+          "size": 0,
+          "binding": 1,
+          "kind": 2,
+          "section": 0,
+          "visibility": 0
+        }
+      ],
+      "exports": [
+        {
+          "name": "_ZN2nn2os11SetHostArgcEi",
+          "value": 500,
+          "size": 32,
+          "binding": 1,
+          "kind": 2,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "_ZN2nn2os11SetHostArgvEPPc",
+          "value": 532,
+          "size": 32,
+          "binding": 1,
+          "kind": 2,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "_init_libc0",
+          "value": 324,
+          "size": 28,
+          "binding": 1,
+          "kind": 2,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "_init_libc1",
+          "value": 388,
+          "size": 28,
+          "binding": 1,
+          "kind": 2,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "_init_libc2",
+          "value": 472,
+          "size": 28,
+          "binding": 1,
+          "kind": 2,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "duplicate_value",
+          "value": 33152,
+          "size": 8,
+          "binding": 1,
+          "kind": 1,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "fixture_argc",
+          "value": 33056,
+          "size": 8,
+          "binding": 1,
+          "kind": 1,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "fixture_argument_area",
+          "value": 33048,
+          "size": 8,
+          "binding": 1,
+          "kind": 1,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "fixture_argv",
+          "value": 33064,
+          "size": 8,
+          "binding": 1,
+          "kind": 1,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "fixture_main_handle",
+          "value": 33040,
+          "size": 8,
+          "binding": 1,
+          "kind": 1,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "force_override",
+          "value": 288,
+          "size": 8,
+          "binding": 1,
+          "kind": 2,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "nninitInitializeSdkModule",
+          "value": 416,
+          "size": 28,
+          "binding": 1,
+          "kind": 2,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "nninitStartup",
+          "value": 444,
+          "size": 28,
+          "binding": 1,
+          "kind": 2,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "nnosInitialize",
+          "value": 352,
+          "size": 36,
+          "binding": 1,
+          "kind": 2,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "sdk_call",
+          "value": 256,
+          "size": 32,
+          "binding": 1,
+          "kind": 2,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "sdk_global",
+          "value": 33024,
+          "size": 8,
+          "binding": 1,
+          "kind": 1,
+          "section": 1,
+          "visibility": 0
+        }
+      ],
+      "relocations": [
+        {
+          "offset": 32832,
+          "kind": 1026,
+          "symbol": 19,
+          "addend": 0
+        },
+        {
+          "offset": 32768,
+          "kind": 1026,
+          "symbol": 7,
+          "addend": 0
+        },
+        {
+          "offset": 32840,
+          "kind": 1026,
+          "symbol": 18,
+          "addend": 0
+        }
+      ],
+      "code_ranges": [
+        [
+          0,
+          4
+        ],
+        [
+          256,
+          564
+        ]
+      ],
+      "code_discovery": {
+        "roots": [
+          0,
+          256,
+          288,
+          296,
+          324,
+          352,
+          388,
+          416,
+          444,
+          472,
+          500,
+          532
+        ],
+        "function_extents": [
+          [
+            0,
+            4
+          ],
+          [
+            256,
+            288
+          ],
+          [
+            288,
+            296
+          ],
+          [
+            296,
+            324
+          ],
+          [
+            324,
+            352
+          ],
+          [
+            352,
+            388
+          ],
+          [
+            388,
+            416
+          ],
+          [
+            416,
+            444
+          ],
+          [
+            444,
+            472
+          ],
+          [
+            472,
+            500
+          ],
+          [
+            500,
+            532
+          ],
+          [
+            532,
+            564
+          ]
+        ],
+        "selected_words": 78,
+        "proven_indirect_sites": [
+          552,
+          520,
+          488,
+          460,
+          432,
+          404,
+          376,
+          340,
+          312,
+          268
+        ],
+        "address_taken_roots": [],
+        "proven_literal_ranges": [],
+        "indirect_memory_policy": "relocation-backed targets; reject discovered overlapping/unknown-alias writes and writable-image pointers passed to imports; trusted host ABI",
+        "stack_pointer_policy": "only bounded aligned immediate SP adjustments and SP-relative load/store writeback; arbitrary SP writes rejected",
+        "relocation_slots_clobbered_by_code": [],
+        "reachable_memory_writes": [
+          {
+            "instruction_offset": 360,
+            "range": [
+              33040,
+              33048
+            ]
+          },
+          {
+            "instruction_offset": 364,
+            "range": [
+              33048,
+              33056
+            ]
+          },
+          {
+            "instruction_offset": 508,
+            "range": [
+              33056,
+              33064
+            ]
+          },
+          {
+            "instruction_offset": 540,
+            "range": [
+              33064,
+              33072
+            ]
+          }
+        ],
+        "rewrite_candidate_audit": {
+          "text_words": 1024,
+          "selected_candidates": [
+            272
+          ],
+          "verified_data_candidates": [],
+          "uncovered_candidates": []
+        }
+      },
+      "rewrite": {
+        "target": "android-arm64",
+        "abi": 1145913601,
+        "size": 49192,
+        "entry_offset": 0,
+        "fixups": [
+          {
+            "offset": 49184,
+            "helper": 2
+          }
+        ],
+        "gates": [
+          {
+            "return_offset": 49168,
+            "kind": 1,
+            "argument": 119
+          }
+        ],
+        "sites": [
+          {
+            "offset": 272,
+            "trampoline": 49152,
+            "instruction": "svc #0x77"
+          }
+        ]
+      },
+      "unsupported": [],
+      "game_boot_status": "NOT_RUN"
+    },
+    {
+      "name": "extra",
+      "source_sha256": "f99a0287c99ea05dc986530b359bee0a1ea8116ba7f8d570bb3a58bb86a277af",
+      "build_id": "b18912bfb907ce58cc781f50255c90240cbd12e4ccf3995bb3f2fa3df2d7ee41",
+      "image_sha256": "80cb5c45e566935f9b7eb77965c942e53550828193842a2439bb68470ab5dfa8",
+      "package_sha256": "41fd750cdfe0155776a5a7b0a477813a6db33c6e4c2a5799a8c98f3c1c60089f",
+      "source_size": 12544,
+      "original_image_size": 40960,
+      "package_size": 49472,
+      "compression_flags": 0,
+      "sections": [
+        {
+          "name": "text",
+          "offset": 0,
+          "size": 4096
+        },
+        {
+          "name": "ro",
+          "offset": 16384,
+          "size": 4096
+        },
+        {
+          "name": "data",
+          "offset": 32768,
+          "size": 4096
+        }
+      ],
+      "bss_size": 4096,
+      "symbol_count": 7,
+      "string_size": 80,
+      "symbol_count_source": "DT_HASH",
+      "init_addresses": [
+        264
+      ],
+      "imports": [
+        {
+          "name": "record_init",
+          "value": 0,
+          "size": 0,
+          "binding": 1,
+          "kind": 2,
+          "section": 0,
+          "visibility": 0
+        }
+      ],
+      "exports": [
+        {
+          "name": "duplicate_value",
+          "value": 33152,
+          "size": 8,
+          "binding": 1,
+          "kind": 1,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "extra_call",
+          "value": 256,
+          "size": 8,
+          "binding": 1,
+          "kind": 2,
+          "section": 1,
+          "visibility": 0
+        },
+        {
+          "name": "extra_global",
+          "value": 33024,
+          "size": 16,
+          "binding": 1,
+          "kind": 1,
+          "section": 1,
+          "visibility": 0
+        }
+      ],
+      "relocations": [
+        {
+          "offset": 32832,
+          "kind": 1026,
+          "symbol": 6,
+          "addend": 0
+        }
+      ],
+      "code_ranges": [
+        [
+          0,
+          4
+        ],
+        [
+          256,
+          292
+        ]
+      ],
+      "code_discovery": {
+        "roots": [
+          0,
+          256,
+          264
+        ],
+        "function_extents": [
+          [
+            0,
+            4
+          ],
+          [
+            256,
+            264
+          ],
+          [
+            264,
+            292
+          ]
+        ],
+        "selected_words": 10,
+        "proven_indirect_sites": [
+          280
+        ],
+        "address_taken_roots": [],
+        "proven_literal_ranges": [],
+        "indirect_memory_policy": "relocation-backed targets; reject discovered overlapping/unknown-alias writes and writable-image pointers passed to imports; trusted host ABI",
+        "stack_pointer_policy": "only bounded aligned immediate SP adjustments and SP-relative load/store writeback; arbitrary SP writes rejected",
+        "relocation_slots_clobbered_by_code": [],
+        "reachable_memory_writes": [],
+        "rewrite_candidate_audit": {
+          "text_words": 1024,
+          "selected_candidates": [],
+          "verified_data_candidates": [],
+          "uncovered_candidates": []
+        }
+      },
+      "rewrite": {
+        "target": "android-arm64",
+        "abi": 1145913601,
+        "size": 49152,
+        "entry_offset": 0,
+        "fixups": [],
+        "gates": [],
+        "sites": []
+      },
+      "unsupported": [],
+      "game_boot_status": "NOT_RUN"
+    }
+  ],
+  "unsupported": []
+}

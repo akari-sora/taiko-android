@@ -1,22 +1,40 @@
 #include "romfs_validate.h"
 #include "dm_i18n.h"
+#include "extent_map.h"
+#include <limits.h>
+#include <errno.h>
 #include <dirent.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 
-static int count_files(const char *root) {
+static int resource_stat(const char *path, struct stat *st) {
+#if defined(__ANDROID__)
+    return lstat(path, st);
+#else
+    /* Desktop/iOS resource fixtures and existing installations may symlink
+     * archive files. Keep that behavior; traversal below remains bounded. */
+    return stat(path, st);
+#endif
+}
+static int count_files_at(const char *root, unsigned depth) {
+    if (depth > 64) return -1;
+    struct stat root_st; if (resource_stat(root, &root_st) || !S_ISDIR(root_st.st_mode)) return -1;
     DIR *d = opendir(root); if (!d) return -1;
     int n = 0; struct dirent *e;
-    while ((e = readdir(d))) {
+    for (;;) {
+        errno = 0; e = readdir(d);
+        if (!e) { if (errno) { closedir(d); return -1; } break; }
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        char p[4096]; snprintf(p, sizeof p, "%s/%s", root, e->d_name);
-        struct stat st; if (stat(p, &st)) { closedir(d); return -1; }
-        n += S_ISDIR(st.st_mode) ? count_files(p) : 1;
-        if (n < 0) { closedir(d); return -1; }
+        char p[4096]; if (snprintf(p, sizeof p, "%s/%s", root, e->d_name) >= (int)sizeof p) { closedir(d); return -1; }
+        struct stat st; if (resource_stat(p, &st) || S_ISLNK(st.st_mode)) { closedir(d); return -1; }
+        int add = S_ISDIR(st.st_mode) ? count_files_at(p, depth + 1) : S_ISREG(st.st_mode) ? 1 : -1;
+        if (add < 0 || n > INT_MAX - add) { closedir(d); return -1; }
+        n += add;
     }
     closedir(d); return n;
 }
+static int count_files(const char *root) { return count_files_at(root, 0); }
 
 // 基底资源要核的只有档案文件（起产品 RomFS 只带简中：06–16 共 11 种语言的配音档案已删；开发机推的完整一份照样通过）。
 // 配置文件（.build.config）不在这里：游戏读的是 App 里覆盖层自带的那份（出包时生成、缺了出包失败，见 ios/run.sh），基底里有没有、对不对都不影响；
@@ -46,12 +64,19 @@ static const long long size[] = {
 // Current state of the i-th required file: 0 complete, 1 missing, 2 wrong byte count (have / want receive the actual and expected sizes), 3 wrong extent
 // table. dir = the directory that directly contains the archive files
 static int need_state(const char *dir, size_t i, long long *have, long long *want) {
-    char p[4096]; snprintf(p, sizeof p, "%s/%s", dir, need[i]); struct stat st; *have = 0; *want = size[i];
-    if (stat(p, &st) || !S_ISREG(st.st_mode)) return 1;
-    char hp[4200]; snprintf(hp, sizeof hp, "%s.holes", p); FILE *hf = fopen(hp, "r");
-    if (hf) { long long lsz = -1, o, l; if (fscanf(hf, "size %lld", &lsz) != 1 || lsz != size[i]) { fclose(hf); return 3; }
-        while (fscanf(hf, "%lld %lld", &o, &l) == 2) *want -= l; fclose(hf); }
-    *have = (long long)st.st_size; return *have == *want ? 0 : 2;
+    char p[4096]; struct stat st; *have = 0; *want = size[i];
+    if (snprintf(p, sizeof p, "%s/%s", dir, need[i]) >= (int)sizeof p || resource_stat(p, &st) || !S_ISREG(st.st_mode) || st.st_size < 0) return 1;
+    *have = (long long)st.st_size;
+    dm_extent_map *map = NULL;
+    int64_t expected_physical, expected_logical;
+    int status = dm_extent_map_load_detail(p, st.st_size, &map, NULL, 0, &expected_physical, &expected_logical);
+    if (status == DM_EXTENT_INVALID) return 3;
+    if (status == DM_EXTENT_SIZE_MISMATCH) { if (expected_logical != size[i]) return 3; *want = expected_physical; return 2; }
+    if (map) {
+        int good = map->logical_size == size[i]; *want = map->physical_size;
+        dm_extent_map_free(map); if (!good) return 3;
+    }
+    return *have == *want ? 0 : 2;
 }
 static void human(long long b, char *o, size_t n) { if (b < 1000000) snprintf(o, n, dm_ui("dmRvBytes"), b); else if (b < 1000000000) snprintf(o, n, "%.0f MB", b / 1048576.0); else snprintf(o, n, "%.2f GB", b / 1073741824.0); }
 // 给玩家看的完整清单（资源界面用）：已有几个 / 共几个，缺的、没拷完的逐个列出（带应有大小），不是只报第一个。返回缺 / 不全的个数
@@ -72,6 +97,8 @@ int dm_romfs_validate(const char *dir, char *why, size_t why_n) {
         if (st == 3) { snprintf(why, why_n, dm_ui("dmRvHoles"), need[i]); return 0; }
         if (st == 2) { snprintf(why, why_n, dm_ui("dmRvShort"), need[i], have, want); return 0; }
     }
-    snprintf(why, why_n, "档案 %d 个齐、字节数对；目录里共 %d 个文件", (int)NEED_N, count_files(dir));   // 通过时 why 供启动日志记一行 | On success, why gives the startup log one line to record
+    int files = count_files(dir);
+    if (files < 0) { snprintf(why, why_n, "Resource tree contains a symlink, unsupported entry, inaccessible path, or exceeds traversal limits"); return 0; }
+    snprintf(why, why_n, "档案 %d 个齐、字节数对；目录里共 %d 个文件", (int)NEED_N, files);   // 通过时 why 供启动日志记一行 | On success, why gives the startup log one line to record
     return 1;
 }

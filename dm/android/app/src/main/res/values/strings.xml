@@ -1,0 +1,11 @@
+<resources>
+    <string name="original_entry_intro">Android 測試畫面已顯示，畫面能在調整尺寸與背景恢復後保持正常。遊戲本體尚未啟動；接下來接上遊戲啟動與必要資源。目前不宣稱可玩。</string>
+    <string name="original_entry_launch">嘗試啟動原版（開發中）</string>
+    <string name="original_entry_preparing">正在核對原版內容與啟動條件…</string>
+    <string name="original_entry_result">%1$s：%2$s\n原版畫面：尚未確認；最後步驟：%3$s</string>
+    <string name="original_entry_not_started">尚未進入原版</string>
+    <string name="original_entry_failed">本次啟動未完成：%1$s</string>
+    <string name="original_entry_blocked">缺少必要條件無法啟動</string>
+    <string name="original_entry_needs_restart">需重新啟動應用程式</string>
+    <string name="original_entry_stopped">本次執行已結束</string>
+</resources>

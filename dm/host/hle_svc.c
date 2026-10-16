@@ -10,6 +10,33 @@
 #include <sched.h>
 #include <time.h>
 
+#ifdef __ANDROID__
+#include "../platform/android/kernel_memory_android.h"
+#include "../platform/android/kernel_platform.h"
+#include <inttypes.h>
+int dm_guest_heap_readable(uint64_t a,size_t n) { return dm_android_heap_readable(a,n); }
+void svc_guest_range(uint8_t** base,size_t* size) { dm_android_memory_range(base,size); }
+uint64_t svc_dispatch(int num,uint64_t* regs,uint64_t orig_addr) {
+    void hlecount_svc(int); int svc_thread(int,uint64_t*); int svc_host_call(int,uint64_t*);
+    hlecount_svc(num);
+    if(svc_thread(num,regs))return regs[0];
+    if(num>=0x80 && svc_host_call(num,regs))return regs[0];
+    if(dm_android_memory_svc(num,regs))return regs[0];
+    switch(num) {
+    case 0x1e: { uint64_t ns=guest_ns();regs[1]=(ns/625)*12+(ns%625)*12/625;regs[0]=0;break; }
+    case 0x27:
+        if(!dm_android_kernel_memory_accessible(regs[0],(size_t)regs[1],0)){regs[0]=0xcc01;break;}
+        if(g_flag.dbg)fprintf(stderr,"[guest] %.*s\n",(int)(regs[1]>INT32_MAX?INT32_MAX:regs[1]),(char*)(uintptr_t)regs[0]);
+        regs[0]=0;break;
+    case 0x26:
+        LOG("Break reason=%#" PRIx64 " svc=%#" PRIx64,regs[0],orig_addr);
+        if(regs[0]&0x80000000ull){regs[0]=0;break;}
+        _exit(42);
+    default:regs[0]=0x4201;break; /* ResultNotImplemented, never silent success. */
+    }
+    return regs[0];
+}
+#else
 // 预留一整块客体地址空间，按 Horizon 分区（地址值直接用宿主 mmap 得到的真地址）。只占地址、不占内存。
 // 大小 5 GB：游戏要的是开头 1 GB（别名区、栈）+ 一整块堆（应用内存池 3285 MiB，见下面 APP_POOL），合计约 4.2 GB；
 // iOS 上不带「扩展虚拟寻址」权限时一次最多能预留 6 GB（真机实读：6 GB 成、7 GB 不成），所以不能留得更宽——
@@ -206,3 +233,5 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         regs[0] = 0; return 0;
     }
 }
+
+#endif /* __ANDROID__ */

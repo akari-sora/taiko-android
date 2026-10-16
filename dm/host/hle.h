@@ -7,10 +7,19 @@
 #pragma once
 #include "dm.h"
 typedef struct { const char *name; void *fn; } hle_ent;
+#if defined(__ANDROID__)
+// ELF start/stop sections contain tightly packed pointer records. The linker
+// must KEEP these input sections (or use -z nostart-stop-gc with start roots).
+#define HLE(mangled, ret, cname, ...)                                                             \
+    static ret cname(__VA_ARGS__);                                                                \
+    __attribute__((used, aligned(8), section("swhle"))) static const hle_ent hle_ent_##cname = {mangled, (void *)cname}; \
+    static ret cname(__VA_ARGS__)
+#else
 #define HLE(mangled, ret, cname, ...)                                                             \
     static ret cname(__VA_ARGS__);                                                                \
     __attribute__((used, section("__DATA,swhle"))) static const hle_ent hle_ent_##cname = {mangled, (void *)cname}; \
     static ret cname(__VA_ARGS__)
+#endif
 
 typedef uint32_t Result;   // nn::Result：w0，0 = 成功 | nn::Result: w0, 0 = success
 #define RES_OK 0u
@@ -37,10 +46,17 @@ void guest_clock_freeze_for(int reason, int on);   // 按原因冻结（1 后台
 // Used only for the service-layer nn:: (service clients of fs/oe/aoc/pctl...); the SDK's libc++ and nn::os internals do not go into this table.
 // Every entry must state the reason for the takeover; an entry in the table that no module references makes loading report a failure and abort (a wrong list must fail loudly).
 typedef struct { const char *name; void *fn; const char *why; } hle_force_ent;
+#if defined(__ANDROID__)
+#define HLE_FORCE(mangled, why, ret, cname, ...)                                                   \
+    static ret cname(__VA_ARGS__);                                                                \
+    __attribute__((used, aligned(8), section("swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why}; \
+    static ret cname(__VA_ARGS__)
+#else
 #define HLE_FORCE(mangled, why, ret, cname, ...)                                                   \
     static ret cname(__VA_ARGS__);                                                                \
     __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why}; \
     static ret cname(__VA_ARGS__)
+#endif
 
 // 运行模式（0 掌机 / 1 主机）：hle_oe.c 持有，hid 的手柄样式跟它走；前端可在运行中切换
 // Operation mode (0 handheld / 1 docked): owned by hle_oe.c, and the hid controller style follows it; the front end can switch it at runtime

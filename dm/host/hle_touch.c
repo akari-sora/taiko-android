@@ -22,6 +22,26 @@ static struct { int st, reported, again; float x, y, ax, ay; } g_f[16];   // aga
 static pthread_mutex_t g_tl = PTHREAD_MUTEX_INITIALIZER;
 static int64_t g_tsamp; static uint64_t g_tlast_ns;
 
+void dm_touch_cancel(void) {
+    pthread_mutex_lock(&g_tl);
+    memset(g_f, 0, sizeof g_f);
+    pthread_mutex_unlock(&g_tl);
+}
+
+void dm_touch_cancel_finger(uint32_t id) {
+    if (id >= 16) return;
+    pthread_mutex_lock(&g_tl);
+    memset(&g_f[id], 0, sizeof g_f[id]);
+    pthread_mutex_unlock(&g_tl);
+}
+
+void dm_touch_reset(void) {
+    pthread_mutex_lock(&g_tl);
+    memset(g_f, 0, sizeof g_f);
+    g_tsamp = 0; g_tlast_ns = 0;
+    pthread_mutex_unlock(&g_tl);
+}
+
 void dm_touch_set(const dm_touch *t, int n) {
     pthread_mutex_lock(&g_tl);
     int seen[16] = {0};
@@ -62,7 +82,6 @@ int touch_fill(void *out, uint64_t now_ns) {
             else g_f[id].st = F_EMPTY;
         }
     }
-    pthread_mutex_unlock(&g_tl);
     int32_t cnt = k; memcpy(o + 0, &samp, 8); memcpy(o + 8, &cnt, 4);
     // DM_TOUCH_LOG=1（验收诊断）：非 0 触点的读逐次记一行——采样号、触点数、各点 finger_id / 面板 x,y / 属性（1 Start、2 End）；封顶 500 行
     // DM_TOUCH_LOG=1 (acceptance diagnostics): each read with non-zero touch points logs one line -- sample number, touch count, and for each point finger_id / panel x,y / attributes (1 Start, 2 End); capped at 500 lines
@@ -73,5 +92,8 @@ int touch_fill(void *out, uint64_t now_ns) {
             m += snprintf(b + m, sizeof b - m, " | #%d (%d,%d) 属性 %d", v[1], v[2], v[3], v[0]); }
         LOG("%s", b); if (++nl == 500) LOG("DM_TOUCH_LOG 满 500 行，停记");
     }
+    // The diagnostic cache and bounded log counter are shared by HID readers
+    // too; keep them under the same lock as the touch state.
+    pthread_mutex_unlock(&g_tl);
     return k;
 }

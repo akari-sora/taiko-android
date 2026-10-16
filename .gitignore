@@ -18,3 +18,27 @@ __pycache__/
 # User-supplied game content must never be committed.
 dm/android/game-files/
 .omx/
+# Taiko private inputs, outputs, and generated original-game artifacts
+.local/
+.omx/
+data/
+*.xci
+*.nsp
+*.nsz
+*.nca
+*.nso
+*.npdm
+*.nacp
+*.cnmt
+*.keys
+*.dmag
+*.spv
+*.apk
+*.aab
+*.acb
+*.usm
+*.unity3d
+dm/platform/android/original_draw_shaders/
+dm/platform/android/original_sampled_shaders/
+dm/platform/android/graphics_fixtures/generated_graphics.h
+dm/platform/android/graphics_fixtures/shaders/

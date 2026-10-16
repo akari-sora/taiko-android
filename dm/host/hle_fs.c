@@ -19,7 +19,20 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdatomic.h>
+#if defined(__ANDROID__)
+#include "../platform/android/fs_platform.h"
+#include <limits.h>
+#define DM_FS_MOBILE_DEFAULT 1
+#define FS_NOATTR ENODATA
+static uint64_t fs_monotonic_ns(void) { return now_ns(); }
+#define clock_gettime_nsec_np(clock) fs_monotonic_ns()
+static int fs_clonefile(const char *a, const char *b, int flags) { (void)flags; return dm_android_fs_clone_tree(a, b); }
+#define clonefile fs_clonefile
+#else
 #include <sys/clonefile.h>
+#define DM_FS_MOBILE_DEFAULT TARGET_OS_IPHONE
+#define FS_NOATTR ENOATTR
+#endif
 #include <sys/xattr.h>
 
 #define RES_PATH_NOT_FOUND 0x202u      // fs 模块 2，描述 1 | fs module 2, description 1
@@ -40,7 +53,11 @@ _Static_assert(sizeof(DirectoryEntry) == 0x310, "DirectoryEntry 布局");
 // Host: at mount, the committed directory commit (= $DM_SAVE) is clonefile'd as a whole tree into the working directory <commit>.work (APFS copy-on-write, nearly zero cost), and the mount points at the working directory,
 // all game reads and writes happen in the working directory; Commit = clonefile(work → <commit>.new), then renamex_np(RENAME_SWAP) swaps it atomically with commit, then the swapped-out old version is deleted.
 // Killed at any moment, commit is either the old version or the new version, never half-written / a mix of old and new; the next mount discards leftover .work / .new.
-typedef struct { char name[32]; char dir[1024]; char overlay[4096]; char commit[1024]; int ro; } mount_t;
+typedef struct { char name[32]; char dir[1024]; char overlay[4096]; char commit[1024]; int ro;
+#if defined(__ANDROID__)
+    int uncertain;
+#endif
+} mount_t;
 static mount_t g_mnt[MAX_MOUNT];   // commit 非空 = 事务式存档挂载 | commit non-empty = transactional save mount
 static int g_nmnt;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -60,6 +77,10 @@ static _Atomic uint64_t g_txn_first_ns;     // 本事务第一次存档写的时
 // if any save write / set-size failed between the last Commit and this Commit, this Commit is refused -- the committed version is unchanged, the working directory is discarded and re-cloned from the committed version,
 // and the front end is notified (front_save_failed); the next transaction (the game's next full save rewrite) is attempted as usual and committed if it succeeds. g_save_poison = errno of the first failure in this transaction (0 = none).
 static _Atomic int g_save_poison;
+static int g_write_cfg = -1, g_write_kill_n, g_write_fail_n, g_write_fail_e;
+#if defined(__ANDROID__)
+static unsigned g_save_directories;
+#endif
 static void save_poison(int e) { int z = 0; atomic_compare_exchange_strong(&g_save_poison, &z, e ? e : EIO); }
 void dm_fs_save_poison(int e) { save_poison(e); }   // 提交前钩子用：旁路文件（编年史 / 百宝囊）没写成也算本事务写失败——照常提交的话，物品已不在角色档里、旁路文件里又没有 | for the pre-commit hook: a side file (Chronicle / pouch) that failed to write also counts as a write failure of this transaction -- if the commit went ahead as usual, the items would no longer be in the character save and would not be in the side file either
 // 缺省弱实现只记日志（Mac）；iOS 前端写同名强实现弹原生提示。在游戏线程调，前端自己切主线程
@@ -68,40 +89,79 @@ __attribute__((weak)) void front_save_failed(int err) { LOG("front_save_failed(e
 // DM_FSLOG=<文件>：每次 ReadFile 记一行 TSV「启动后秒\t客体路径\t偏移\t长度\t客体缓冲地址」（启动读了哪些字节，离线对清单反查用）
 // DM_FSLOG=<file>: each ReadFile logs one TSV line "seconds since boot\tguest path\toffset\tlength\tguest buffer address" (which bytes boot read, for offline reverse lookup against the manifest)
 static FILE *g_fslog; static char *g_fdpath[4096]; static pthread_mutex_t g_fslog_lock = PTHREAD_MUTEX_INITIALIZER;
-static void fslog_init(void) { static int done; if (done) return; done = 1; const char *e = getenv("DM_FSLOG"); if (e && !(g_fslog = fopen(e, "w"))) die("DM_FSLOG 打不开 %s", e); }
+static int g_fslog_done;
+static int g_fslog_hash = -1;
+static uint64_t g_read_calls, g_read_bytes, g_read_next_bytes = 64 << 20;
+static pthread_mutex_t g_read_lock = PTHREAD_MUTEX_INITIALIZER;
+static void fslog_init(void) { if (g_fslog_done) return; g_fslog_done = 1; const char *e = getenv("DM_FSLOG"); if (e && !(g_fslog = fopen(e, "w"))) die("DM_FSLOG 打不开 %s", e); }
 
 static const char *envdir(const char *var, const char *rel, char *buf, size_t n) {
     const char *v = getenv(var);
     if (v) return v;
+#if defined(__ANDROID__)
+    (void)rel; (void)buf; (void)n;
+    errno = ENOENT; return NULL; /* Application supplies explicit internal paths. */
+#else
     snprintf(buf, n, "%s%s/%s", getenv("DM_ROOT") ?: getenv("HOME"), getenv("DM_ROOT") ? "" : "/dm-work", rel); return buf;
+#endif
 }
 
 static int rm_tree(const char *p);
-static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
-    PATH_LOCK(); pthread_mutex_lock(&g_lock);
+/* Caller holds g_path_lock, including the complete Android mount/default
+ * preparation. g_lock protects the mount publication itself. */
+static Result mount_ex_locked(const char *name, const char *dir, int ro, int txn) {
+    pthread_mutex_lock(&g_lock);
+    const char *overlay = getenv("DM_ROMFS_OVERLAY");
+#if defined(__ANDROID__)
+    if (!name || !*name || strchr(name, ':') || strchr(name, '/') || !dir || dir[0] != '/' ||
+        strlen(name) >= sizeof g_mnt[0].name || strlen(dir) + (txn ? 5 : 0) >= sizeof g_mnt[0].dir ||
+        (overlay && strlen(overlay) >= sizeof g_mnt[0].overlay)) {
+        pthread_mutex_unlock(&g_lock); return RES_FAIL;
+    }
+#endif
     for (int i = 0; i < g_nmnt; i++)
         if (!strcmp(g_mnt[i].name, name)) { pthread_mutex_unlock(&g_lock); return RES_OK; }
-    if (g_nmnt >= MAX_MOUNT) die("挂载表满");
+    if (g_nmnt >= MAX_MOUNT) {
+#if defined(__ANDROID__)
+        pthread_mutex_unlock(&g_lock); return RES_FAIL;
+#else
+        die("挂载表满");
+#endif
+    }
     strlcpy(g_mnt[g_nmnt].name, name, sizeof g_mnt[0].name);
     g_mnt[g_nmnt].ro = ro; g_mnt[g_nmnt].overlay[0] = 0; g_mnt[g_nmnt].commit[0] = 0;
-    if (!strcmp(name, "rom") && getenv("DM_ROMFS_OVERLAY"))
-        strlcpy(g_mnt[g_nmnt].overlay, getenv("DM_ROMFS_OVERLAY"), sizeof g_mnt[0].overlay);
+    if (!strcmp(name, "rom") && overlay)
+        strlcpy(g_mnt[g_nmnt].overlay, overlay, sizeof g_mnt[0].overlay);
     if (txn) {
         char work[1100], neu[1100]; snprintf(work, sizeof work, "%s.work", dir); snprintf(neu, sizeof neu, "%s.new", dir);
+#if defined(__ANDROID__)
+        struct stat st;
+        int rc = mkdir(dir, 0755);
+        if ((rc && errno != EEXIST) || lstat(dir, &st) || !S_ISDIR(st.st_mode) ||
+            (!lstat(work, &st) && rm_tree(work)) || (!lstat(neu, &st) && rm_tree(neu)) || clonefile(dir, work, 0)) {
+            pthread_mutex_unlock(&g_lock); return RES_FAIL;
+        }
+#else
         mkdir(dir, 0755);
         if (!access(work, F_OK) && rm_tree(work)) die("存档事务：清不掉上次残留的工作目录 %s", work);
         if (!access(neu, F_OK) && rm_tree(neu)) die("存档事务：清不掉上次残留的 %s", neu);
         if (clonefile(dir, work, 0)) die("存档事务：clonefile %s → %s 失败 errno=%d", dir, work, errno);
+#endif
         strlcpy(g_mnt[g_nmnt].commit, dir, sizeof g_mnt[0].commit);
         atomic_store(&g_save_poison, 0);                                // 工作目录刚从已提交版克隆，完好 | the working directory was just cloned from the committed version, intact
         strlcpy(g_mnt[g_nmnt].dir, work, sizeof g_mnt[0].dir);
     } else strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
     g_nmnt++;
     pthread_mutex_unlock(&g_lock);
-    if (!ro && !txn) mkdir(dir, 0755);
+    if (!ro && !txn && mkdir(dir, 0755) && errno != EEXIST) {
+#if defined(__ANDROID__)
+        g_nmnt--; return RES_FAIL;
+#endif
+    }
     LOG("fs 挂载 %s: → %s%s%s", name, txn ? g_mnt[g_nmnt - 1].dir : dir, ro ? "（只读）" : txn ? "（事务式存档：工作目录，Commit 原子换入）" : "", g_mnt[g_nmnt - 1].overlay[0] ? "（overlay 优先）" : "");
     return RES_OK;
 }
+static Result mount_ex(const char *name, const char *dir, int ro, int txn) { PATH_LOCK(); return mount_ex_locked(name, dir, ro, txn); }
 static Result mount(const char *name, const char *dir, int ro) { return mount_ex(name, dir, ro, 0); }
 
 // APFS 缺省不分大小写，Horizon 路径分大小写：每个组件按客体名精确查找。
@@ -113,9 +173,14 @@ static Result mount(const char *name, const char *dir, int ro) { return mount_ex
 #define FS_GUEST_NAME "org.d2rmobile.guest-name"
 static int guest_name(const char *parent, const char *physical, char *out, size_t n) {
     char p[1280]; snprintf(p, sizeof p, "%s/%s", parent, physical);
+#if defined(__ANDROID__)
+    if (snprintf(p, sizeof p, "%s/%s", parent, physical) >= (int)sizeof p) { errno = ENAMETOOLONG; return 0; }
+    ssize_t k = dm_android_fs_get_guest_name(p, out, n - 1);
+#else
     ssize_t k = getxattr(p, FS_GUEST_NAME, out, n - 1, 0, XATTR_NOFOLLOW);
+#endif
     if (k >= 0) { out[k] = 0; return 1; }
-    if (errno != ENOATTR) return 0;
+    if (errno != FS_NOATTR) return 0;
     strlcpy(out, physical, n); return 1;
 }
 static int path_component(char *parent, size_t n, const char *name, int create) {
@@ -123,7 +188,7 @@ static int path_component(char *parent, size_t n, const char *name, int create) 
     struct dirent *e; char physical[0x301] = "", guest[0x301];
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        if (!guest_name(parent, e->d_name, guest, sizeof guest)) { closedir(d); return 0; }
+        if (!guest_name(parent, e->d_name, guest, sizeof guest)) { int saved = errno; closedir(d); errno = saved; return 0; }
         if (!strcmp(guest, name)) { strlcpy(physical, e->d_name, sizeof physical); break; }
     }
     closedir(d);
@@ -141,9 +206,17 @@ static int path_component(char *parent, size_t n, const char *name, int create) 
     }
     size_t len = strlen(parent), k = strlen(physical);
     if (len + k + 2 > n) { errno = ENAMETOOLONG; return 0; }
-    parent[len] = '/'; memcpy(parent + len + 1, physical, k + 1); return 1;
+    parent[len] = '/'; memcpy(parent + len + 1, physical, k + 1);
+#if defined(__ANDROID__)
+    struct stat check;
+    if (!lstat(parent, &check) && S_ISLNK(check.st_mode)) { errno = ELOOP; return 0; }
+#endif
+    return 1;
 }
 static int root_path(const char *root, const char *rest, char *out, size_t n) {
+#if defined(__ANDROID__)
+    if (strlen(root) >= n) { errno = ENAMETOOLONG; return 0; }
+#endif
     strlcpy(out, root, n);
     while (*rest) {
         while (*rest == '/') rest++;
@@ -200,6 +273,7 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
         if (ro) *ro = g_mnt[i].ro;
         const char *rest = c + 1;
         if (g_mnt[i].overlay[0] && !create) return rom_overlay_path(&g_mnt[i], rest, out, n);
+        if (strlen(g_mnt[i].dir) >= n) { errno = ENAMETOOLONG; return 0; }
         strlcpy(out, g_mnt[i].dir, n);
         while (*rest) {
             while (*rest == '/') rest++;
@@ -217,7 +291,9 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
     }
     errno = ENOENT; return 0;
 }
+#if !defined(__ANDROID__)
 static int host_path(const char *p, char *out, size_t n, int *ro) { return host_path_ex(p, out, n, ro, 0); }
+#endif
 static int set_guest_name(const char *hp, const char *path) {
     const char *end = path + strlen(path); while (end > path && end[-1] == '/') end--;
     const char *start = end; while (start > path && start[-1] != '/' && start[-1] != ':') start--;
@@ -225,8 +301,13 @@ static int set_guest_name(const char *hp, const char *path) {
     if (k >= sizeof guest) { errno = ENAMETOOLONG; return -1; }
     memcpy(guest, start, k); guest[k] = 0;
     const char *physical = strrchr(hp, '/') + 1;
+#if defined(__ANDROID__)
+    if (strcmp(physical, guest)) return dm_android_fs_set_guest_name(hp, guest, strlen(guest));
+    if (!dm_android_fs_remove_guest_name(hp) || errno == FS_NOATTR) return 0;
+#else
     if (strcmp(physical, guest)) return setxattr(hp, FS_GUEST_NAME, guest, strlen(guest), 0, XATTR_NOFOLLOW);
-    if (!removexattr(hp, FS_GUEST_NAME, XATTR_NOFOLLOW) || errno == ENOATTR) return 0;
+    if (!removexattr(hp, FS_GUEST_NAME, XATTR_NOFOLLOW) || errno == FS_NOATTR) return 0;
+#endif
     return -1;
 }
 static Result err_res(const char *op, const char *path) {
@@ -297,7 +378,7 @@ static void stash_seed_one(const char *save_dir, const char *name) {
 // 标准级与专家级各一份，各判各的（游戏按角色类型选文件名，main+0x2ce1e8：DLC 类型标准 = ModernSharedStashSoftCoreV2、专家 = ModernSharedStashHardCoreV2；文件格式相同）
 // One copy each for standard and hardcore, each judged on its own (the game picks the file name by character type, main+0x2ce1e8: DLC type standard = ModernSharedStashSoftCoreV2, hardcore = ModernSharedStashHardCoreV2; same file format)
 static void stash_seed(const char *save_dir) {
-    const char *e = getenv("DM_STASH_SEED"); int on = e ? strcmp(e, "0") != 0 : TARGET_OS_IPHONE; if (!on) return;   // iOS 上缺省开；Mac 宿主缺省关（对拍 / 存档事务这些闸门逐字节比存档目录，多出一个文件就红），要验时设 DM_STASH_SEED=1 | on by default on iOS; off by default on the Mac host (gate checks such as lockstep comparison / save transaction compare the save directory byte by byte, one extra file turns them red), set DM_STASH_SEED=1 to verify
+    const char *e = getenv("DM_STASH_SEED"); int on = e ? strcmp(e, "0") != 0 : DM_FS_MOBILE_DEFAULT; if (!on) return;   // iOS 上缺省开；Mac 宿主缺省关（对拍 / 存档事务这些闸门逐字节比存档目录，多出一个文件就红），要验时设 DM_STASH_SEED=1 | on by default on iOS; off by default on the Mac host (gate checks such as lockstep comparison / save transaction compare the save directory byte by byte, one extra file turns them red), set DM_STASH_SEED=1 to verify
     stash_seed_one(save_dir, "ModernSharedStashSoftCoreV2"); stash_seed_one(save_dir, "ModernSharedStashHardCoreV2");
 }
 #else
@@ -308,7 +389,7 @@ static void stash_seed(const char *save_dir) { (void)save_dir; }
 // Fallback for 「大字体」(Large Font) (settings key "Low Vision Mode"): if it is 1 in the settings file, change it back to 0. It switches the UI to the original game's low-vision layout profile, which our touch UI was never built for; it hangs after being turned on in the settings page.
 // This item in the settings page is separately hidden by the UI overlay; this here guarantees that devices where it was already turned on recover on restart. Same switch as settings_seed (on by default on iOS, on the Mac host only with DM_TOUCH_DEFAULTS=1)
 static void low_vision_off(const char *save_dir) {
-    const char *e = getenv("DM_TOUCH_DEFAULTS"); int on = e ? strcmp(e, "0") != 0 : TARGET_OS_IPHONE; if (!on) return;
+    const char *e = getenv("DM_TOUCH_DEFAULTS"); int on = e ? strcmp(e, "0") != 0 : DM_FS_MOBILE_DEFAULT; if (!on) return;
     char path[1200]; snprintf(path, sizeof path, "%s/Settings/Settings.json", save_dir); static char buf[65536]; FILE *f = fopen(path, "rb"); if (!f) return;
     size_t n = fread(buf, 1, sizeof buf - 1, f); fclose(f); if (n == sizeof buf - 1) return; buf[n] = 0;
     char *k = strstr(buf, "\"Low Vision Mode\""); if (!k) return; char *v = strchr(k + 17, ':'); if (!v) return; v++; while (*v == ' ' || *v == '\t') v++;
@@ -317,7 +398,7 @@ static void low_vision_off(const char *save_dir) {
     if (ok && !rename(tmp, path)) LOG("设置兜底：「大字体」（Low Vision Mode）是开着的，已改回关"); else remove(tmp);
 }
 static void settings_seed(const char *save_dir) {
-    const char *e = getenv("DM_TOUCH_DEFAULTS"); int on = e ? strcmp(e, "0") != 0 : TARGET_OS_IPHONE; if (!on) return;
+    const char *e = getenv("DM_TOUCH_DEFAULTS"); int on = e ? strcmp(e, "0") != 0 : DM_FS_MOBILE_DEFAULT; if (!on) return;
     static const char *kv[][2] = {{"\"Item Name Display\"", "1"}, {"\"Item Tooltip Hotkey Appender\"", "0"},
                                   {"\"AutoMapMode\"", "2"}, {"\"AutoMap Open On Load\"", "1"}};
     char dir[1100], path[1200]; snprintf(dir, sizeof dir, "%s/Settings", save_dir); snprintf(path, sizeof path, "%s/Settings.json", dir);
@@ -379,8 +460,26 @@ HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv；存档 �
     // 不给缺省目录：静默落到一个没有角色的目录上会让「选角」测量失真（曾因此误判过）。跑局一律用 save_ref 的新副本
     // No default directory: silently landing on a directory with no characters distorts the "character select" measurement (this once caused a misjudgment). Runs always use a fresh copy of save_ref
     const char *d = getenv("DM_SAVE");
+#if defined(__ANDROID__)
+    PATH_LOCK();
+    if (!name || !*name || strchr(name, ':') || strchr(name, '/') || strlen(name) >= sizeof g_mnt[0].name ||
+        !d || d[0] != '/' || strlen(d) + 5 >= sizeof g_mnt[0].dir) return RES_FAIL;
+    /* Defaults belong to a first mount only, before a working copy is made. */
+    for (int i = 0; i < g_nmnt; i++) if (!strcmp(g_mnt[i].name, name)) return RES_OK;
+#else
     if (!d) die("未设 DM_SAVE：请指向一份存档目录的可写副本");
+#endif
     char dd[1024]; strlcpy(dd, d, sizeof dd); size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;   // 去掉结尾斜杠（.work / .new 拼在同级） | strip trailing slashes (.work / .new are appended at the same level)
+#if defined(__ANDROID__)
+    /* A second alias must never delete the first mount's live working tree.
+     * Compare both spelling and directory identity before defaults mutate it. */
+    struct stat proposed, existing;
+    int have_proposed = !stat(dd, &proposed);
+    for (int i = 0; i < g_nmnt; i++) if (g_mnt[i].commit[0] &&
+        (!strcmp(g_mnt[i].commit, dd) || (have_proposed && !stat(g_mnt[i].commit, &existing) &&
+         proposed.st_dev == existing.st_dev && proposed.st_ino == existing.st_ino))) return RES_FAIL;
+    if ((mkdir(dd, 0755) && errno != EEXIST) || lstat(dd, &proposed) || !S_ISDIR(proposed.st_mode)) return RES_FAIL;
+#endif
     stash_seed(dd);
     low_vision_off(dd);
     settings_seed(dd); settings_lang_apply(dd);
@@ -388,8 +487,12 @@ HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv；存档 �
     // iOS 上缺省写；Mac 宿主的对拍闸门（存档要和真机真值逐文件相同）不写
     // Rule files for the loot filter (the game loads them at startup; dm_lootfilter.c registers this hook from a constructor; it is null in unit tests that link only hle_fs.c). Same switch as settings_seed:
     // written by default on iOS; not written under the Mac host's parity gate (saves must match the device ground truth file by file)
-    { const char *e = getenv("DM_TOUCH_DEFAULTS"); if (g_dm_mount_seed_hook && (e ? strcmp(e, "0") != 0 : TARGET_OS_IPHONE)) g_dm_mount_seed_hook(dd); }
+    { const char *e = getenv("DM_TOUCH_DEFAULTS"); if (g_dm_mount_seed_hook && (e ? strcmp(e, "0") != 0 : DM_FS_MOBILE_DEFAULT)) g_dm_mount_seed_hook(dd); }
+#if defined(__ANDROID__)
+    return mount_ex_locked(name, dd, 0, 1);
+#else
     return mount_ex(name, dd, 0, 1);
+#endif
 }
 void (*g_dm_pre_commit_hook[4])(const char *workdir);   // 提交前调（工作目录）：宿主旁路文件按工作目录里的存档内容核对后再写（[0] 个人仓库多页 dm_pages.c、[2] 百宝囊 dm_pouch.c、[1] 编年史仓库 dm_vault.c、[3] 秘境进度 dm_rift.c） | called before commit (working directory): host side files are checked against the save contents in the working directory before being written ([0] personal stash pages dm_pages.c, [2] pouch dm_pouch.c, [1] chronicle vault dm_vault.c, [3] rift progress dm_rift.c)
 void (*g_dm_save_commit_hook)(const char *commit_dir);   // 存档提交成功后调（已提交目录）；iOS 的 iCloud 同步设它，宿主为空 | called after a save commit succeeds (committed directory); the iOS iCloud sync sets it, NULL on the host
@@ -399,6 +502,47 @@ HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv；事务式存档：工作目录整�
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
     int i = 0; while (i < g_nmnt && strcmp(g_mnt[i].name, name)) i++;
     if (i == g_nmnt || !g_mnt[i].commit[0]) { pthread_mutex_unlock(&g_lock); return RES_OK; }   // 非事务挂载：无可提交 | non-transactional mount: nothing to commit
+#if defined(__ANDROID__)
+    mount_t *m = &g_mnt[i];
+    int saved = 0;
+    if (m->uncertain) { pthread_mutex_unlock(&g_lock); front_save_failed(EIO); return RES_FAIL; }
+    for (int k = 0; k < 4; k++) if (g_dm_pre_commit_hook[k]) g_dm_pre_commit_hook[k](m->dir);
+    int perr = atomic_load(&g_save_poison);
+    char neu[1100]; snprintf(neu, sizeof neu, "%s.new", m->commit);
+    struct stat st;
+    if (perr) {
+        /* Replacing the working tree while handles still address it would let
+         * later writes land in an unlinked tree. Retry rollback after close. */
+        if (g_save_directories) saved = EBUSY;
+        for (int k = 0; k < 65536; k++) if (g_fsave[k]) { saved = EBUSY; break; }
+        if (!saved && ((!lstat(neu, &st) && rm_tree(neu)) || clonefile(m->commit, neu, 0) ||
+                       dm_android_fs_exchange(neu, m->dir))) saved = errno;
+        if (!saved) { (void)rm_tree(neu); atomic_store(&g_save_poison, 0); }
+        pthread_mutex_unlock(&g_lock);
+        front_save_failed(saved ? saved : perr);
+        return RES_FAIL;
+    }
+    /* Snapshot and writes share g_path_lock. A commit is acknowledged only
+     * after all snapshot content and its parent directory are durable. */
+    if ((!lstat(neu, &st) && rm_tree(neu)) || clonefile(m->dir, neu, 0) ||
+        dm_android_fs_sync_tree(neu) || dm_android_fs_sync_parent(neu)) saved = errno;
+    if (!saved && dm_android_fs_exchange(neu, m->commit)) saved = errno;
+    else if (!saved && dm_android_fs_sync_parent(m->commit)) {
+        /* Publication occurred, durability is indeterminate. Keep both trees
+         * and refuse another commit until a new session remounts them. */
+        saved = errno; m->uncertain = 1;
+    }
+    if (saved) {
+        if (!m->uncertain) (void)rm_tree(neu);
+        pthread_mutex_unlock(&g_lock); front_save_failed(saved); return RES_FAIL;
+    }
+    (void)rm_tree(neu);
+    atomic_store(&g_txn_first_ns, 0);
+    atomic_fetch_add(&g_save_commits, 1);
+    if (g_dm_save_commit_hook) g_dm_save_commit_hook(m->commit);
+    pthread_mutex_unlock(&g_lock);
+    return RES_OK;
+#else
     uint64_t tc0 = clock_gettime_nsec_np(CLOCK_MONOTONIC), tw0 = atomic_exchange(&g_txn_first_ns, 0);
     for (int k = 0; k < 4; k++) if (g_dm_pre_commit_hook[k]) g_dm_pre_commit_hook[k](g_mnt[i].dir);
     uint64_t tc1 = clock_gettime_nsec_np(CLOCK_MONOTONIC);   // 写进工作目录的旁路文件随这次提交一起原子换入 | side files written into the working directory are swapped in atomically together with this commit
@@ -435,6 +579,7 @@ HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv；事务式存档：工作目录整�
         if (g_dm_save_commit_hook) g_dm_save_commit_hook(g_mnt[i].commit); }   // iCloud 同步（cloud_ios.m）：持着锁调，那边只做 clonefile 快照 | iCloud sync (cloud_ios.m): called with the lock held, that side only takes a clonefile snapshot
     pthread_mutex_unlock(&g_lock);
     return r;
+#endif
 }
 HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv；挂载表常驻，卸载为空操作", void, h_fs_Unmount, const char *name) { (void)name; }
 
@@ -448,76 +593,80 @@ HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv；挂载表常驻，卸载为空操�
 // "<archive name>.holes" (text: first line `size <original byte count>`, then one line `<zero-filled range start> <zero-filled range length>` each, ascending by start, non-overlapping).
 // When reading such archives the host translates offsets through the table: bytes falling in a zero-filled range return 0 and the file size is reported as the original value; the game and the startup prefetch still see the original layout, and not a single word of the index needs changing.
 // There are only two read entry points: ReadFile in this file and the startup prefetch in hle_tact.c, both going through dm_data_pread. Files without .holes take the original path with zero extra overhead.
-typedef struct { int64_t size; int n; int64_t *log, *len, *phys; char name[40]; } holemap;   // 保留段：原始起点 / 长度 / 在剔零文件里的起点 | Kept segment: original start / length / start in the zero-stripped file
-static _Atomic uint64_t g_hole_reads;   // 读到零段的次数：正常应为 0（零段是砍掉的过场视频 / 旧版音乐，游戏不该来读）；非 0 = 砍错了 | Number of reads that hit a zero-filled range: should normally be 0 (zero-filled ranges are stripped cutscene videos / old-version music the game should not come to read); non-zero = stripped wrongly
+#include "extent_map.h"
+typedef struct { dm_extent_map *map; char name[40]; } holemap;
+static _Atomic uint64_t g_hole_reads;
+static _Atomic uint64_t g_hole_edge_reads;
+static _Atomic int g_hole_said[64];
+#if defined(__ANDROID__)
+static holemap *g_hm[65536];
+#else
 static holemap *g_hm[4096];
-static holemap *hm_load(const char *hostpath) {
-    char hp2[1100]; if (snprintf(hp2, sizeof hp2, "%s.holes", hostpath) >= (int)sizeof hp2) return NULL;
-    FILE *f = fopen(hp2, "r"); if (!f) return NULL;
-    long long size = -1, o, l; if (fscanf(f, "size %lld", &size) != 1 || size < 0) die("区段表格式不对：%s", hp2);
-    holemap *m = calloc(1, sizeof *m); int cap = 64; m->size = size; m->log = malloc(cap * sizeof *m->log); m->len = malloc(cap * sizeof *m->len); m->phys = malloc(cap * sizeof *m->phys);
-    int64_t pos = 0, phys = 0;
-    while (fscanf(f, "%lld %lld", &o, &l) == 2) {
-        if (o < pos || l <= 0 || o + l > size) die("区段表零段越界或乱序：%s（%lld %lld）", hp2, o, l);
-        if (o > pos) { if (m->n == cap) { cap *= 2; m->log = realloc(m->log, cap * sizeof *m->log); m->len = realloc(m->len, cap * sizeof *m->len); m->phys = realloc(m->phys, cap * sizeof *m->phys); }
-            m->log[m->n] = pos; m->len[m->n] = o - pos; m->phys[m->n++] = phys; phys += o - pos; }
-        pos = o + l;
-    }
-    fclose(f);
-    if (pos < size) { if (m->n == cap) { cap++; m->log = realloc(m->log, cap * sizeof *m->log); m->len = realloc(m->len, cap * sizeof *m->len); m->phys = realloc(m->phys, cap * sizeof *m->phys); }
-        m->log[m->n] = pos; m->len[m->n] = size - pos; m->phys[m->n++] = phys; phys += size - pos; }
-    struct stat st; if (stat(hostpath, &st) || st.st_size != phys) die("剔零档案长度与区段表不符：%s 实际 %lld，按表应为 %lld", hostpath, (long long)st.st_size, (long long)phys);
-    const char *bn = strrchr(hostpath, '/'); strlcpy(m->name, bn ? bn + 1 : hostpath, sizeof m->name);
-    { static _Atomic int said[64]; unsigned h = 0; for (const char *c = m->name; *c; c++) h = h * 31 + (unsigned char)*c;   // 每个档案只在首次登记时打一行 | Print a line for each archive only on first registration
-      if (!atomic_exchange(&said[h % 64], 1)) LOG("剔零档案 %s：原始 %lld 字节，实存 %lld 字节，保留段 %d 个", m->name, (long long)size, (long long)phys, m->n); }
-    return m;
+#endif
+static unsigned char g_hm_bad[sizeof g_hm / sizeof g_hm[0]];
+static void hm_free(holemap *m) { if (m) { dm_extent_map_free(m->map); free(m); } }
+void dm_data_note_fd(int fd, const char *hostpath) {
+    if (fd < 0 || fd >= (int)(sizeof g_hm / sizeof g_hm[0])) return;
+    hm_free(g_hm[fd]); g_hm[fd] = NULL; g_hm_bad[fd] = 0;
+    struct stat st; dm_extent_map *map = NULL; char why[160] = "file metadata failed";
+    int status = fstat(fd, &st) ? DM_EXTENT_INVALID : dm_extent_map_load(hostpath, st.st_size, &map, why, sizeof why);
+    if (status == DM_EXTENT_ABSENT) return;
+    if (status == DM_EXTENT_INVALID) { g_hm_bad[fd] = 1; LOG("Invalid archive extent map %s: %s", hostpath, map ? "file metadata failed" : why); errno = EINVAL; return; }
+    holemap *m = calloc(1, sizeof *m);
+    if (!m) { dm_extent_map_free(map); g_hm_bad[fd] = 1; errno = ENOMEM; return; }
+    m->map = map; const char *bn = strrchr(hostpath, '/'); strlcpy(m->name, bn ? bn + 1 : hostpath, sizeof m->name);
+    unsigned h = 0; for (const char *c = m->name; *c; c++) h = h * 31 + (unsigned char)*c;
+    if (!atomic_exchange(&g_hole_said[h % 64], 1)) LOG("Archive %s: logical %lld, physical %lld, kept extents %zu", m->name, (long long)map->logical_size, (long long)map->physical_size, map->count);
+    g_hm[fd] = m;
 }
-void dm_data_note_fd(int fd, const char *hostpath) {   // 打开资源档案后调：有区段表就登记 | Called after opening a resource archive: register it if there is an extent table
-    if (fd < 0 || fd >= 4096) return;
-    g_hm[fd] = hm_load(hostpath);
+int64_t dm_data_logical_size(const char *hostpath, int64_t phys_size) {
+    dm_extent_map *map = NULL; char why[160];
+    int status = dm_extent_map_load(hostpath, phys_size, &map, why, sizeof why);
+    if (status == DM_EXTENT_ABSENT) return phys_size;
+    if (status == DM_EXTENT_INVALID) { int saved = errno; LOG("Invalid archive extent map %s: %s", hostpath, why); errno = saved; return -1; }
+    int64_t size = map->logical_size; dm_extent_map_free(map); return size;
 }
-int64_t dm_data_logical_size(const char *hostpath, int64_t phys_size) {   // 列目录 / 取大小用：有区段表报原始大小 | For directory listing / size queries: report the original size when there is an extent table
-    char hp2[1100]; if (snprintf(hp2, sizeof hp2, "%s.holes", hostpath) >= (int)sizeof hp2) return phys_size;
-    FILE *f = fopen(hp2, "r"); if (!f) return phys_size; long long size = -1; int ok = fscanf(f, "size %lld", &size) == 1; fclose(f); return ok && size >= 0 ? size : phys_size;
-}
-ssize_t dm_data_pread(int fd, void *buf, size_t n, off_t off) {   // 语义同 pread（可能短读）；剔零档案按区段表换算 | Same semantics as pread (may short-read); zero-stripped archives are translated through the extent table
-    holemap *m = fd >= 0 && fd < 4096 ? g_hm[fd] : NULL;
-    if (!m) return pread(fd, buf, n, off);
-    if (off >= m->size) return 0;
-    if ((int64_t)n > m->size - off) n = (size_t)(m->size - off);
-    int lo = 0, hi = m->n;   // 第一个 结束点 > off 的保留段 | The first kept segment whose end point > off
-    while (lo < hi) { int mid = (lo + hi) / 2; if (m->log[mid] + m->len[mid] <= off) lo = mid + 1; else hi = mid; }
-    size_t done = 0;
-    while (done < n) {
-        int64_t cur = off + (int64_t)done;
-        if (lo < m->n && cur >= m->log[lo]) {   // 在保留段里：直接读进目标缓冲 | In a kept segment: read directly into the destination buffer
-            int64_t in = cur - m->log[lo]; size_t want = n - done; if ((int64_t)want > m->len[lo] - in) want = (size_t)(m->len[lo] - in);
-            size_t got = 0; while (got < want) { ssize_t r = pread(fd, (uint8_t *)buf + done + got, want - got, m->phys[lo] + in + (int64_t)got); if (r < 0) { if (errno == EINTR) continue; return -1; } if (r == 0) return (ssize_t)(done + got); got += (size_t)r; }
-            done += want; if (in + (int64_t)want == m->len[lo]) lo++;
-        } else {                               // 在零段里：填 0 到下一保留段起点 | In a zero-filled range: fill 0 up to the start of the next kept segment
-            int64_t end = lo < m->n ? m->log[lo] : m->size; size_t z = n - done; if ((int64_t)z > end - cur) z = (size_t)(end - cur);
-            memset((uint8_t *)buf + done, 0, z); done += z;
-            // 游戏按 256 KB 对齐的整块读：要的是零段旁边的保留文件时，整块会顺带压到零段边缘（无害，保留文件的字节照给）。
-            // 一次读整个落在零段里才是真在读被砍的内容 → 报红（前 20 次逐条，之后每 1000 次一行）；跨边界的只说明前 3 次
-            // The game reads whole blocks aligned to 256 KB: when what it wants is a kept file next to a zero-filled range, the whole block incidentally overlaps the edge of the zero-filled range (harmless, the kept file's bytes are returned as usual).
-            // Only a read that lies entirely inside a zero-filled range is really reading stripped content → report a failure (the first 20 one by one, then one line per 1000); boundary-crossing reads are only noted the first 3 times
-            if (z == n) { uint64_t hr = atomic_fetch_add(&g_hole_reads, 1);
-                if (hr < 20 || hr % 1000 == 0) LOG("【红】读到剔零区段 %s 偏移 %lld 长 %zu（第 %llu 次；整块都在被砍掉的过场视频 / 旧版音乐里，说明砍错了或有新的读者）", m->name, (long long)off, n, (unsigned long long)hr + 1);
-            } else { static _Atomic uint64_t edge; if (atomic_fetch_add(&edge, 1) < 3) LOG("整块读压到剔零区段边缘（无害）：%s 读 %lld 长 %zu，其中 %zu 字节在零段", m->name, (long long)off, n, z); }
+ssize_t dm_data_pread(int fd, void *buf, size_t n, off_t off) {
+    holemap *m = fd >= 0 && fd < (int)(sizeof g_hm / sizeof g_hm[0]) ? g_hm[fd] : NULL;
+    if (fd >= 0 && fd < (int)(sizeof g_hm_bad / sizeof g_hm_bad[0]) && g_hm_bad[fd]) { errno = EINVAL; return -1; }
+    ssize_t result = dm_extent_map_pread(m ? m->map : NULL, fd, buf, n, off);
+    if (m && result > 0) {
+        int64_t end = off + result, kept = 0;
+        size_t lo = 0, hi = m->map->count;
+        while (lo < hi) { size_t mid = lo + (hi - lo) / 2; const dm_extent *e = &m->map->kept[mid]; if (e->logical + e->length <= off) lo = mid + 1; else hi = mid; }
+        for (size_t i = lo; i < m->map->count; i++) {
+            const dm_extent *e = &m->map->kept[i];
+            if (e->logical >= end) break;
+            int64_t start = off > e->logical ? off : e->logical;
+            int64_t stop = end < e->logical + e->length ? end : e->logical + e->length;
+            if (stop > start) kept += stop - start;
         }
+        if (!kept) { uint64_t count = atomic_fetch_add(&g_hole_reads, 1); if (count < 20 || count % 1000 == 0) LOG("Read stripped content %s offset %lld length %zd", m->name, (long long)off, result); }
+        else if (kept != result && atomic_fetch_add(&g_hole_edge_reads, 1) < 3) LOG("Archive read crosses stripped extent edge %s offset %lld length %zd", m->name, (long long)off, result);
     }
-    return (ssize_t)done;
+    return result;
 }
 HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Result, h_fs_OpenFile, uint64_t *out, const char *path, int mode) {
     HP(path);
+#if defined(__ANDROID__)
+    if (!mode || (mode & ~7) || !(mode & (MODE_READ | MODE_WRITE))) return RES_FAIL;
+#endif
     if (mode & (MODE_WRITE | MODE_APPEND)) RW();
     int fd = open(hp, (mode & (MODE_WRITE | MODE_APPEND)) ? ((mode & MODE_READ) ? O_RDWR : O_WRONLY) : O_RDONLY);
     if (fd < 0) return err_res("open", hp);
-    struct stat st; fstat(fd, &st);
+    struct stat st;
+    if (fstat(fd, &st)) { int e = errno; close(fd); errno = e; return err_res("fstat", hp); }
     if (S_ISDIR(st.st_mode)) { close(fd); return RES_PATH_NOT_FOUND; }
-    if (fd >= (int)sizeof g_fmode) die("fd 超出表");
+    if (fd >= (int)sizeof g_fmode) {
+#if defined(__ANDROID__)
+        close(fd); return RES_FAIL;
+#else
+        die("fd 超出表");
+#endif
+    }
     g_fmode[fd] = (uint8_t)mode; *out = (uint64_t)fd;
-    g_hm[fd] = NULL; if (!(mode & (MODE_WRITE | MODE_APPEND))) dm_data_note_fd(fd, hp);
+    hm_free(g_hm[fd]); g_hm[fd] = NULL; g_hm_bad[fd] = 0; if (!(mode & (MODE_WRITE | MODE_APPEND))) dm_data_note_fd(fd, hp);
+    if (g_hm_bad[fd]) { int saved = errno; g_fmode[fd] = 0; close(fd); errno = saved; return err_res("extent map", hp); }
     { const char *c = strchr(path, ':'); size_t ln = c ? (size_t)(c - path) : 0; g_fsave[fd] = 0;
       for (int i = 0; c && i < g_nmnt; i++) if (strlen(g_mnt[i].name) == ln && !strncmp(g_mnt[i].name, path, ln)) g_fsave[fd] = g_mnt[i].commit[0] != 0; }
     fslog_init();
@@ -526,6 +675,10 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) {
+#if defined(__ANDROID__)
+    PATH_LOCK();
+    if (h >= sizeof g_fmode || !(g_fmode[h] & MODE_READ) || off < 0 || sz > INT64_MAX || (uint64_t)off > (uint64_t)INT64_MAX - sz) return RES_FAIL;
+#endif
     size_t got = 0; uint64_t t0 = g_flag.bootprof ? now_ns() : 0;
     dm_guest_write_prepare(buf, sz);   // 目标可能是图形层写保护的贴图池页：内核写只读页返回 EFAULT 而不缺页，先解保护并标脏 | The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first
     while (got < sz) {
@@ -537,31 +690,33 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
     *out = got;
     if (g_flag.bootprof) dm_prof_add(PROF_FS_READ, now_ns() - t0, got);
     if (g_fslog) { pthread_mutex_lock(&g_fslog_lock);
-        static int hash_on = -1; if (hash_on < 0) hash_on = getenv("DM_FSLOG_HASH") != NULL;   // DM_FSLOG_HASH=1：末尾加一列读到内容的 FNV-1a 64（对比两份资源包读到的字节是否一致） | DM_FSLOG_HASH=1: append a column with the FNV-1a 64 of the content read (to compare whether the bytes read from two resource packs match)
-        uint64_t fh = 0xcbf29ce484222325ull; if (hash_on) for (size_t i = 0; i < got; i++) fh = (fh ^ ((uint8_t *)buf)[i]) * 0x100000001b3ull;
-        if (hash_on) fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\t%016llx\n", (now_ns() - g_t0_ns) / 1e9, (int)h < 4096 && g_fdpath[(int)h] ? g_fdpath[(int)h] : "?", (long long)off, got, buf, (unsigned long long)fh);
+        if (g_fslog_hash < 0) g_fslog_hash = getenv("DM_FSLOG_HASH") != NULL;   // DM_FSLOG_HASH=1：末尾加一列读到内容的 FNV-1a 64（对比两份资源包读到的字节是否一致） | DM_FSLOG_HASH=1: append a column with the FNV-1a 64 of the content read (to compare whether the bytes read from two resource packs match)
+        uint64_t fh = 0xcbf29ce484222325ull; if (g_fslog_hash) for (size_t i = 0; i < got; i++) fh = (fh ^ ((uint8_t *)buf)[i]) * 0x100000001b3ull;
+        if (g_fslog_hash) fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\t%016llx\n", (now_ns() - g_t0_ns) / 1e9, (int)h >= 0 && (int)h < 4096 && g_fdpath[(int)h] ? g_fdpath[(int)h] : "?", (long long)off, got, buf, (unsigned long long)fh);
         else fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\n", (now_ns() - g_t0_ns) / 1e9, (int)h < 4096 && g_fdpath[(int)h] ? g_fdpath[(int)h] : "?", (long long)off, got, buf);
         pthread_mutex_unlock(&g_fslog_lock); }
     if (g_flag.fs) {   // 读取计量：每累计 64 MiB 或每 1000 次打一行 | Read metering: print a line every 64 MiB accumulated or every 1000 reads
-        static uint64_t n, bytes, next_b = 64 << 20; static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
-        pthread_mutex_lock(&m); n++; bytes += got;
-        if (bytes >= next_b || n % 1000 == 0) { LOG("fs 读 累计 %llu 次 %.1f MiB（本次 fd %d 偏移 %#llx 长 %#zx）", n, bytes / 1048576.0, (int)h, off, got); if (bytes >= next_b) next_b += 64 << 20; }
-        pthread_mutex_unlock(&m);
+        pthread_mutex_lock(&g_read_lock); g_read_calls++; g_read_bytes += got;
+        if (g_read_bytes >= g_read_next_bytes || g_read_calls % 1000 == 0) { LOG("fs 读 累计 %llu 次 %.1f MiB（本次 fd %d 偏移 %#llx 长 %#zx）", (unsigned long long)g_read_calls, g_read_bytes / 1048576.0, (int)h, (unsigned long long)off, got); if (g_read_bytes >= g_read_next_bytes) g_read_next_bytes += 64 << 20; }
+        pthread_mutex_unlock(&g_read_lock);
     }
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp-srv → pwrite(2)", Result, h_fs_WriteFile, uint64_t h, int64_t off, const void *buf, size_t sz, const void *opt) {
+#if defined(__ANDROID__)
+    PATH_LOCK();
+    if (h >= sizeof g_fmode || !(g_fmode[h] & MODE_WRITE) || off < 0 || sz > INT64_MAX || (uint64_t)off > (uint64_t)INT64_MAX - sz) return RES_FAIL;
+#endif
     (void)opt; size_t put = 0;
     if (g_fsave[(int)h & 0xffff]) {                                     // 存档写注入点（确定性回归用；只数存档挂载上的写） | Save write injection point (for deterministic regression; only writes on the save mount are counted)
-        static int cfg = -1, kill_n, fail_n, fail_e;
-        if (cfg < 0) { const char *k = getenv("DM_TEST_KILL_AT"), *f = getenv("DM_TEST_FS_FAIL");
-            kill_n = k && !strncmp(k, "write:", 6) ? atoi(k + 6) : 0;
-            if (f && !strncmp(f, "write:", 6)) { fail_n = atoi(f + 6); const char *c = strchr(f + 6, ':'); fail_e = c ? atoi(c + 1) : ENOSPC; }
-            cfg = 1; }
+        if (g_write_cfg < 0) { const char *k = getenv("DM_TEST_KILL_AT"), *f = getenv("DM_TEST_FS_FAIL");
+            g_write_kill_n = k && !strncmp(k, "write:", 6) ? atoi(k + 6) : 0;
+            if (f && !strncmp(f, "write:", 6)) { g_write_fail_n = atoi(f + 6); const char *c = strchr(f + 6, ':'); g_write_fail_e = c ? atoi(c + 1) : ENOSPC; }
+            g_write_cfg = 1; }
         int n = atomic_fetch_add(&g_save_writes, 1) + 1;
         { uint64_t z = 0; atomic_compare_exchange_strong(&g_txn_first_ns, &z, clock_gettime_nsec_np(CLOCK_MONOTONIC)); }
-        if (kill_n && n == kill_n) { LOG("DM_TEST_KILL_AT：存档第 %d 次写，直接 _exit（模拟写到一半被杀）", n); _exit(9); }
-        if (fail_n && n == fail_n) { LOG("DM_TEST_FS_FAIL：存档第 %d 次写返回失败 errno=%d", n, fail_e); errno = fail_e; save_poison(fail_e); return err_res("pwrite（注入）", "fd"); }
+        if (g_write_kill_n && n == g_write_kill_n) { LOG("DM_TEST_KILL_AT：存档第 %d 次写，直接 _exit（模拟写到一半被杀）", n); _exit(9); }
+        if (g_write_fail_n && n == g_write_fail_n) { LOG("DM_TEST_FS_FAIL：存档第 %d 次写返回失败 errno=%d", n, g_write_fail_e); errno = g_write_fail_e; save_poison(g_write_fail_e); return err_res("pwrite（注入）", "fd"); }
     }
     while (put < sz) {
         ssize_t r = pwrite((int)h, (const uint8_t *)buf + put, sz - put, off + put);
@@ -572,19 +727,43 @@ HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", "fsp-srv → fstat(2)", Result, h_fs_GetFileSize, int64_t *out, uint64_t h) {
+#if defined(__ANDROID__)
+    PATH_LOCK(); if (h >= sizeof g_fmode || !g_fmode[h]) return RES_FAIL;
+#endif
     struct stat st; if (fstat((int)h, &st)) return err_res("fstat", "fd");
-    *out = (int)h < 4096 && g_hm[(int)h] ? g_hm[(int)h]->size : st.st_size; return RES_OK;
+    if (h < sizeof g_hm_bad / sizeof g_hm_bad[0] && g_hm_bad[h]) { errno = EINVAL; return err_res("extent map", "fd"); }
+    *out = h < sizeof g_hm / sizeof g_hm[0] && g_hm[h] ? g_hm[h]->map->logical_size : st.st_size; return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", "fsp-srv → ftruncate(2)", Result, h_fs_SetFileSize, uint64_t h, int64_t sz) {
+#if defined(__ANDROID__)
+    PATH_LOCK(); if (h >= sizeof g_fmode || !(g_fmode[h] & MODE_WRITE) || sz < 0) return RES_FAIL;
+#endif
     if (!ftruncate((int)h, sz)) return RES_OK;
     if (g_fsave[(int)h & 0xffff]) save_poison(errno);
     return err_res("ftruncate", "fd");
 }
-HLE_FORCE("_ZN2nn2fs9FlushFileENS0_10FileHandleE", "fsp-srv；宿主 write 已进页缓存，刷新为空操作", Result, h_fs_FlushFile, uint64_t h) { (void)h; return RES_OK; }
-HLE_FORCE("_ZN2nn2fs9CloseFileENS0_10FileHandleE", "fsp-srv → close(2)", void, h_fs_CloseFile, uint64_t h) { g_fmode[(int)h & 0xffff] = 0; g_fsave[(int)h & 0xffff] = 0;
-    if ((int)h >= 0 && (int)h < 4096 && g_hm[(int)h]) { holemap *m = g_hm[(int)h]; g_hm[(int)h] = NULL; free(m->log); free(m->len); free(m->phys); free(m); }
+HLE_FORCE("_ZN2nn2fs9FlushFileENS0_10FileHandleE", "fsp-srv；宿主 write 已进页缓存，刷新为空操作", Result, h_fs_FlushFile, uint64_t h) {
+#if defined(__ANDROID__)
+    PATH_LOCK(); if (h >= sizeof g_fmode || !g_fmode[h]) return RES_FAIL;
+    if (fsync((int)h)) { if (g_fsave[h]) save_poison(errno); return RES_FAIL; }
+#else
+    (void)h;
+#endif
+    return RES_OK;
+}
+HLE_FORCE("_ZN2nn2fs9CloseFileENS0_10FileHandleE", "fsp-srv → close(2)", void, h_fs_CloseFile, uint64_t h) {
+#if defined(__ANDROID__)
+    PATH_LOCK(); if (h >= sizeof g_fmode || !g_fmode[h]) return;
+#endif
+    g_fmode[(int)h & 0xffff] = 0; g_fsave[(int)h & 0xffff] = 0;
+    if (h < sizeof g_hm / sizeof g_hm[0] && g_hm[h]) { holemap *m = g_hm[h]; g_hm[h] = NULL; hm_free(m); }
+    if (h < sizeof g_hm_bad / sizeof g_hm_bad[0]) g_hm_bad[h] = 0;
     close((int)h); }
-HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv；打开方式由宿主记录", int, h_fs_GetFileOpenMode, uint64_t h) { return g_fmode[(int)h & 0xffff]; }
+HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv；打开方式由宿主记录", int, h_fs_GetFileOpenMode, uint64_t h) {
+#if defined(__ANDROID__)
+    PATH_LOCK(); if (h >= sizeof g_fmode) return 0;
+#endif
+    return g_fmode[(int)h & 0xffff]; }
 
 // ---------- 路径操作 ----------
 // ---------- Path operations ----------
@@ -603,6 +782,9 @@ HLE_FORCE("_ZN2nn2fs15CreateDirectoryEPKc", "fsp-srv → mkdir(2)", Result, h_fs
     if (set_guest_name(hp, path)) { int e = errno; rmdir(hp); errno = e; return err_res("mkdir name", hp); }
     return RES_OK; }
 static int rm_tree(const char *p) {
+#if defined(__ANDROID__)
+    return dm_android_fs_remove_tree(p);
+#else
     DIR *d = opendir(p); if (!d) return -1;
     struct dirent *e; char c[1024]; int rc = 0;
     while ((e = readdir(d))) {
@@ -612,13 +794,20 @@ static int rm_tree(const char *p) {
     }
     closedir(d);
     return rc | rmdir(p);
+#endif
 }
 HLE_FORCE("_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc", "fsp-srv → 递归删除（只在可写挂载内）", Result, h_fs_DeleteDirRec, const char *path) {
     HP(path); RW(); return rm_tree(hp) ? err_res("rmtree", hp) : RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs10RenameFileEPKcS2_", "fsp-srv → rename(2)", Result, h_fs_RenameFile, const char *from, const char *to) {
     HP(from); RW(); char hp2[1024];
+#if defined(__ANDROID__)
+    int dest_ro = 0;
+    if (!host_path_ex(to, hp2, sizeof hp2, &dest_ro, 1)) return err_res("rename path", to);
+    if (dest_ro) return RES_FAIL;
+#else
     if (!host_path_ex(to, hp2, sizeof hp2, NULL, 1)) return err_res("rename path", to);
+#endif
     if (!access(hp2, F_OK)) return RES_PATH_EXISTS;
     if (rename(hp, hp2)) return err_res("rename", hp);
     if (set_guest_name(hp2, to)) { int e = errno; if (rename(hp2, hp)) die("fs 改名元数据失败且回退失败 errno=%d", errno); errno = e; return err_res("rename name", hp2); }
@@ -632,17 +821,41 @@ HLE_FORCE("_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc", "fsp-srv → 
 
 // ---------- 目录 ----------
 // ---------- Directories ----------
-typedef struct { DIR *d; char path[1024]; DIR *od; char opath[1024]; DirectoryEntry *snap; int64_t nsnap, psnap; int mode; } dirh_t;
-static void dir_snapshot(dirh_t *h, const mount_t *m, const char *rest) {
+typedef struct dirh { DIR *d; char path[1024]; DIR *od; char opath[1024]; DirectoryEntry *snap; int64_t nsnap, psnap; int mode;
+#if defined(__ANDROID__)
+    struct dirh *next;
+    int save;
+#endif
+} dirh_t;
+#if defined(__ANDROID__)
+static dirh_t *g_dirs;
+static int dir_valid(uint64_t hh) { for (dirh_t *h = g_dirs; h; h = h->next) if ((uint64_t)h == hh) return 1; return 0; }
+#endif
+static int dir_snapshot(dirh_t *h, const mount_t *m, const char *rest) {
     char *roots = strdup(m->overlay);
     char (*names)[0x301] = calloc(2048, sizeof *names);
     const char **all = calloc(65, sizeof *all);
     char *parent = malloc(1024), *guest = malloc(0x301), *rel = malloc(2048), *resolved = malloc(1024);
-    if (!roots || !names || !all || !parent || !guest || !rel || !resolved) die("rom overlay 目录快照分配失败");
+    if (!roots || !names || !all || !parent || !guest || !rel || !resolved) {
+#if defined(__ANDROID__)
+        errno = ENOMEM; goto fail;
+#else
+        die("rom overlay 目录快照分配失败");
+#endif
+    }
     int nn = 0, nr = 0;
     all[nr++] = m->dir;
     char *save = NULL;
-    for (char *root = strtok_r(roots, ":", &save); root && nr < 65; root = strtok_r(NULL, ":", &save)) all[nr++] = root;
+    for (char *root = strtok_r(roots, ":", &save); root; root = strtok_r(NULL, ":", &save)) {
+        if (nr == 65) {
+#if defined(__ANDROID__)
+            errno = EOVERFLOW; goto fail;
+#else
+            break;
+#endif
+        }
+        all[nr++] = root;
+    }
     for (int ri = nr - 1; ri >= 0; ri--) {
         if (!root_path(all[ri], rest, parent, 1024)) continue;
         DIR *x = opendir(parent); if (!x) continue;
@@ -650,35 +863,69 @@ static void dir_snapshot(dirh_t *h, const mount_t *m, const char *rest) {
         while ((e = readdir(x))) {
             if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
             { size_t dl = strlen(e->d_name); if (dl > 6 && !strcmp(e->d_name + dl - 6, ".holes")) continue; }   // 区段表不给游戏看 | The extent table is not shown to the game
-            if (!guest_name(parent, e->d_name, guest, 0x301)) continue;
+            if (!guest_name(parent, e->d_name, guest, 0x301)) {
+#if defined(__ANDROID__)
+                closedir(x); goto fail;
+#else
+                continue;
+#endif
+            }
             int dup = 0; for (int j = 0; j < nn; j++) if (!strcmp(names[j], guest)) { dup = 1; break; }
             if (!dup && nn < 2048) strlcpy(names[nn++], guest, sizeof names[0]);
+#if defined(__ANDROID__)
+            else if (!dup) { closedir(x); errno = EOVERFLOW; goto fail; }
+#endif
         }
         closedir(x);
     }
-    h->snap = calloc(nn, sizeof *h->snap); h->nsnap = nn;
-    if (nn && !h->snap) die("rom overlay 目录快照分配失败");
+    h->snap = calloc(nn ? (size_t)nn : 1, sizeof *h->snap); h->nsnap = nn;
+    if (!h->snap) {
+#if defined(__ANDROID__)
+        errno = ENOMEM; goto fail;
+#else
+        if (nn) die("rom overlay 目录快照分配失败");
+#endif
+    }
     for (int j = 0; j < nn; j++) {
         strlcpy(h->snap[j].name, names[j], sizeof h->snap[j].name);
         snprintf(rel, 2048, "%s/%s", rest, names[j]);
         if (!rom_overlay_path(m, rel, resolved, 1024)) continue;
         struct stat st;
-        if (!stat(resolved, &st)) { h->snap[j].type = S_ISDIR(st.st_mode) ? ENT_DIR : ENT_FILE; h->snap[j].size = S_ISDIR(st.st_mode) ? 0 : dm_data_logical_size(resolved, st.st_size); }
+        if (!stat(resolved, &st)) { h->snap[j].type = S_ISDIR(st.st_mode) ? ENT_DIR : ENT_FILE; h->snap[j].size = S_ISDIR(st.st_mode) ? 0 : dm_data_logical_size(resolved, st.st_size); if (h->snap[j].size < 0) {
+            free(h->snap); h->snap = NULL; free(resolved); free(rel); free(guest); free(parent); free(all); free(names); free(roots); return 0;
+        } }
     }
     free(resolved); free(rel); free(guest); free(parent); free(all); free(names); free(roots);
+    return 1;
+#if defined(__ANDROID__)
+fail:
+    free(h->snap); h->snap = NULL;
+    free(resolved); free(rel); free(guest); free(parent); free(all); free(names); free(roots);
+    return 0;
+#endif
 }
 HLE_FORCE("_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", "fsp-srv → opendir(3)", Result, h_fs_OpenDirectory, uint64_t *out, const char *path, int mode) {
     HP(path); DIR *d = opendir(hp);
     if (!d) return err_res("opendir", hp);
-    dirh_t *h = calloc(1, sizeof *h); h->d = d; strlcpy(h->path, hp, sizeof h->path); h->mode = mode;
+    dirh_t *h = calloc(1, sizeof *h);
+    if (!h) { closedir(d); return RES_FAIL; }
+    h->d = d; strlcpy(h->path, hp, sizeof h->path); h->mode = mode;
     const char *c = strchr(path, ':');
     if (c) for (int i = 0; i < g_nmnt; i++) if (g_mnt[i].overlay[0] && strlen(g_mnt[i].name) == (size_t)(c - path) && !strncmp(g_mnt[i].name, path, (size_t)(c - path))) {
-        dir_snapshot(h, &g_mnt[i], c + 1); break;
+        if (!dir_snapshot(h, &g_mnt[i], c + 1)) { closedir(d); free(h); return RES_FAIL; } break;
     }
+#if defined(__ANDROID__)
+    if (c) for (int i = 0; i < g_nmnt; i++) if (g_mnt[i].commit[0] && strlen(g_mnt[i].name) == (size_t)(c - path) && !strncmp(g_mnt[i].name, path, (size_t)(c - path))) { h->save = 1; g_save_directories++; break; }
+    h->next = g_dirs; g_dirs = h;
+#endif
     *out = (uint64_t)h; return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandleEl", "fsp-srv → readdir(3)", Result, h_fs_ReadDirectory, int64_t *count, DirectoryEntry *ents, uint64_t hh, int64_t max) {
     PATH_LOCK(); dirh_t *h = (dirh_t *)hh; int64_t n = 0; struct dirent *e;
+#if defined(__ANDROID__)
+    if (!dir_valid(hh) || max < 0 || (uint64_t)max > SIZE_MAX / sizeof *ents) return RES_FAIL;
+    dm_guest_write_prepare(ents, (size_t)max * sizeof *ents);
+#endif
     if (h->snap) { while (n < max && h->psnap < h->nsnap) { DirectoryEntry *src = &h->snap[h->psnap++]; if (!(h->mode & (src->type == ENT_DIR ? DIRMODE_DIR : DIRMODE_FILE))) continue; ents[n++] = *src; } *count = n; return RES_OK; }
     while (n < max && (e = readdir(h->d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
@@ -690,9 +937,50 @@ HLE_FORCE("_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandl
         DirectoryEntry *o = &ents[n++]; memset(o, 0, sizeof *o);
         if (!guest_name(h->path, e->d_name, o->name, sizeof o->name)) { *count = n - 1; return err_res("directory name", c); }
         o->type = isdir ? ENT_DIR : ENT_FILE; o->size = isdir ? 0 : dm_data_logical_size(c, st.st_size);
+        if (o->size < 0) { *count = n - 1; return err_res("extent map", c); }
     }
     *count = n; return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE", "fsp-srv → closedir(3)", void, h_fs_CloseDirectory, uint64_t hh) {
+#if defined(__ANDROID__)
+    PATH_LOCK();
+    dirh_t **slot = &g_dirs; while (*slot && (uint64_t)*slot != hh) slot = &(*slot)->next;
+    if (!*slot) return;
+    if ((*slot)->save) g_save_directories--;
+    *slot = (*slot)->next;
+#endif
     dirh_t *h = (dirh_t *)hh; closedir(h->d); if (h->od) closedir(h->od); free(h->snap); free(h);
 }
+
+#if defined(__ANDROID__)
+static int has_open_handles_locked(void) {
+    if (g_dirs) return 1;
+    for (size_t k = 0; k < sizeof g_fmode; k++) if (g_fmode[k]) return 1;
+    return 0;
+}
+int dm_android_fs_has_open_handles(void) { PATH_LOCK(); return has_open_handles_locked(); }
+int dm_android_fs_reset(void) {
+    PATH_LOCK();
+    if (has_open_handles_locked()) { errno = EBUSY; return 0; }
+    pthread_mutex_lock(&g_lock);
+    memset(g_mnt, 0, sizeof g_mnt); g_nmnt = 0;
+    memset(g_fmode, 0, sizeof g_fmode); memset(g_fsave, 0, sizeof g_fsave); memset(g_hm_bad, 0, sizeof g_hm_bad);
+    for (size_t k = 0; k < sizeof g_hm / sizeof g_hm[0]; k++) if (g_hm[k]) {
+        holemap *m = g_hm[k]; g_hm[k] = NULL;
+        hm_free(m);
+    }
+    pthread_mutex_lock(&g_fslog_lock);
+    if (g_fslog) fclose(g_fslog);
+    g_fslog = NULL; g_fslog_done = 0; g_fslog_hash = -1;
+    for (size_t k = 0; k < sizeof g_fdpath / sizeof g_fdpath[0]; k++) { free(g_fdpath[k]); g_fdpath[k] = NULL; }
+    pthread_mutex_unlock(&g_fslog_lock);
+    atomic_store(&g_save_poison, 0); atomic_store(&g_save_writes, 0);
+    atomic_store(&g_save_commits, 0); atomic_store(&g_txn_first_ns, 0); atomic_store(&g_hole_reads, 0);
+    atomic_store(&g_hole_edge_reads, 0);
+    for (size_t k = 0; k < sizeof g_hole_said / sizeof g_hole_said[0]; k++) atomic_store(&g_hole_said[k], 0);
+    g_read_calls = g_read_bytes = 0; g_read_next_bytes = 64 << 20; g_save_directories = 0;
+    g_write_cfg = -1; g_write_kill_n = g_write_fail_n = g_write_fail_e = 0;
+    pthread_mutex_unlock(&g_lock);
+    return 1;
+}
+#endif

@@ -3,6 +3,8 @@
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/vm_map.h>
+#elif defined(__ANDROID__)
+#include "../../platform/android/guest_memory.h"
 #endif
 int dm_tg_vm_read(uint64_t address,void *out,size_t bytes) {
     if(!out || !bytes || !address || address>UINT64_MAX-bytes)return 0;
@@ -10,6 +12,8 @@ int dm_tg_vm_read(uint64_t address,void *out,size_t bytes) {
     vm_size_t copied=0;
     kern_return_t rc=vm_read_overwrite(mach_task_self(),(vm_address_t)address,(vm_size_t)bytes,(vm_address_t)out,&copied);
     return rc==KERN_SUCCESS && copied==bytes;
+#elif defined(__ANDROID__)
+    return dm_android_guest_copy(address,out,bytes);
 #else
     (void)address;return 0;
 #endif

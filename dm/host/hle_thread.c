@@ -24,8 +24,15 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <time.h>
+#ifdef __ANDROID__
+#include "../platform/android/kernel_thread_adapter.h"
+#include <sys/syscall.h>
+#include <sys/uio.h>
+#include <unistd.h>
+#else
 #include <mach/mach.h>
 #include <pthread/qos.h>
+#endif
 #include <dlfcn.h>
 
 #define R_TIMEOUT     0xEA01u   // 内核模块 1，描述 117 | Kernel module 1, description 117
@@ -38,6 +45,10 @@
 
 enum { O_FREE, O_THREAD, O_EVENT_R, O_EVENT_W };
 typedef struct event { int signaled; int refs; } event_t;
+#ifdef __ANDROID__
+static void se_created(uint32_t writable, event_t *event);
+static void se_closed(uint32_t writable, event_t *event);
+#endif
 typedef struct thr {
     uint32_t handle; uint64_t id;
     uint64_t entry, arg, stack_top; int prio, core; uint64_t mask;
@@ -53,7 +64,14 @@ typedef struct thr {
     int last_svc; uint64_t last_lr;
     int closed;                // 句柄已关：与 exited 同时成立才释放对象（Horizon：线程对象随最后一个引用消失） | Handle closed: the object is freed only when this holds together with exited (Horizon: the thread object goes away with the last reference)
     uint64_t nsvc;             // SVC 次数（现场导出用） | SVC count (for the state dump)
+#ifdef __ANDROID__
+    pid_t host_tid;
+    int host_policy, host_priority;
+    uint64_t stack_pin;
+    int worker;
+#else
     mach_port_t mport;         // 宿主线程端口（取 CPU 时间） | Host thread port (to get CPU time)
+#endif
     uint32_t qos;
 } thr_t;
 static thr_t *g_all;
@@ -62,12 +80,29 @@ static pthread_mutex_t G = PTHREAD_MUTEX_INITIALIZER;
 #define MAX_H 4096
 static struct { int type; void *obj; } g_h[MAX_H];
 static pthread_key_t g_keythr;
+#ifdef __ANDROID__
+static pthread_once_t g_key_once = PTHREAD_ONCE_INIT;
+static void thread_attachment_destroy(void *p);
+static void thread_key_create(void) {
+    if (pthread_key_create(&g_keythr, thread_attachment_destroy)) die("thread TSD allocation");
+}
+#endif
+static thr_t *thread_current(void) {
+#ifdef __ANDROID__
+    pthread_once(&g_key_once, thread_key_create);
+#endif
+    return pthread_getspecific(g_keythr);
+}
 static uint64_t g_next_id = 0x51;
 static thr_t *g_wait;          // 全部在等的线程（锁 / 条件 / 地址 / 同步） | All waiting threads (lock / condition / address / synchronization)
 
 static uint32_t h_new(int type, void *obj) {     // 调用方持 G | Caller holds G
     for (int i = 1; i < MAX_H; i++) if (!g_h[i].type) { g_h[i].type = type; g_h[i].obj = obj; return 0x1000 + i; }
+#ifdef __ANDROID__
+    return 0;
+#else
     die("句柄表满");
+#endif
 }
 static void *h_peek(uint32_t h, int type) {      // 只查不报 | Lookup only, no report
     if (h == H_CUR_THREAD && type == O_THREAD) return pthread_getspecific(g_keythr);
@@ -81,7 +116,7 @@ static void *h_get(uint32_t h, int type) {       // 查不到即报（句柄错�
     return o;
 }
 static thr_t *cur(void) {
-    thr_t *t = pthread_getspecific(g_keythr);
+    thr_t *t = thread_current();
     if (!t) die("非客体线程调用了线程 SVC");
     return t;
 }
@@ -117,6 +152,10 @@ static int64_t block(thr_t *t, int kind, int64_t ns) {   // 启动时间线：�
 }
 static int64_t block_inner(thr_t *t, int kind, int64_t ns) {
     t->wkind = kind; t->woke = 0; t->next = g_wait; g_wait = t; t->wseq = ++g_wseq;
+#if defined(__ANDROID__) && defined(DM_TEST_HOOKS)
+    extern void (*dm_test_wait_registered)(uint32_t, int);
+    if (dm_test_wait_registered) dm_test_wait_registered(t->handle, kind);
+#endif
     if (ns == 0) { wait_unlink(t); t->wkind = 0; return R_TIMEOUT; }
     struct timespec dl;
     int det_wait = ns > 0 && dm_detclock_enabled();
@@ -135,6 +174,9 @@ static int64_t block_inner(thr_t *t, int kind, int64_t ns) {
     }
     return t->wres;
 }
+#if defined(__ANDROID__) && defined(DM_TEST_HOOKS)
+void (*dm_test_wait_registered)(uint32_t, int);
+#endif
 
 // ---------- 锁 ----------
 // ---------- Locks ----------
@@ -167,6 +209,31 @@ static void lock_acquire_for(thr_t *t, uint64_t addr, uint32_t tag) {
 // ---------- Threads ----------
 extern void dm_thread_enter(uint64_t entry, uint64_t arg, uint64_t sp);   // entry.S
 uint32_t (*dm_thread_tick_fn)(void);   // 取当前游戏拍；diag.c 初始化时登记（单测不登记，拍号记 0） | Gets the current game tick; registered when diag.c initializes (unit tests do not register it, the tick number is recorded as 0)
+#ifdef __ANDROID__
+static void thread_finish(thr_t *t);
+static void thread_host_metadata(thr_t *t) {
+    t->host_tid = (pid_t)syscall(SYS_gettid);
+    struct sched_param param;
+    if (!pthread_getschedparam(pthread_self(), &t->host_policy, &param))
+        t->host_priority = param.sched_priority;
+}
+static void *thread_main(void *p) {
+    thr_t *t = p;
+    if (pthread_setspecific(g_keythr, t)) die("thread attachment");
+    pthread_mutex_lock(&G);
+    thread_host_metadata(t);
+    while (!t->started && !t->closed) pthread_cond_wait(&t->cv, &G);
+    int run = t->started;
+    pthread_mutex_unlock(&G);
+    int explicit_exit = run ? dm_android_kernel_thread_run(t->entry, t->arg, t->stack_top) : 1;
+    // Guest ExitThread only restores the host frame. Releasing the mapping,
+    // publishing completion and waking waiters must happen here afterwards.
+    if (t->stack_pin) dm_android_kernel_stack_unpin(t->stack_pin);
+    if (!explicit_exit) die("Android guest thread setup failed or entry returned without ExitThread");
+    thread_finish(t);
+    return NULL;
+}
+#else
 void crash_thread_init(void);
 void guest_thread_init(void);   // thread.c：每线程 TSD 槽（门、x18、TLS、TLR）唯一设置点 | thread.c: the single place that sets the per-thread TSD slots (gate, x18, TLS, TLR)
 static void *thread_main(void *p) {
@@ -182,12 +249,17 @@ static void *thread_main(void *p) {
     dm_thread_enter(t->entry, t->arg, t->stack_top);   // 不返回：客体须经 ExitThread 退出 | Does not return: the guest must exit through ExitThread
     die("客体线程入口返回");
 }
+#endif
 static void thr_free(thr_t *t) {   // 持 G；从全部线程链摘下并释放 | Holding G; unlink from the all-threads chain and free
     for (thr_t **p = &g_all; *p; p = &(*p)->all) if (*p == t) { *p = t->all; break; }
     pthread_cond_destroy(&t->cv); free(t);
 }
 static const char *thr_name(thr_t *t, char *buf, size_t n);
 static void thread_exit(thr_t *t) {
+#ifdef __ANDROID__
+    (void)t;
+    dm_android_kernel_thread_exit(0);
+#else
     t->exit_ns = now_ns(); t->exit_tick = dm_thread_tick_fn ? dm_thread_tick_fn() : 0;
     // 这里不打日志：退出发生在客体线程自己的栈上（有的只有十几 KiB），带浮点的 printf 会把栈撑爆（真机冒烟：LibcurlResolver 退出时 SIGBUS，回溯 fprintf → __dtoa）。时刻只记下来，现场导出时再打
     // No logging here: the exit happens on the guest thread's own stack (some are only a dozen or so KiB), and a printf with floating point would blow the stack (real-device smoke test: SIGBUS when LibcurlResolver exits, backtrace fprintf → __dtoa). Only the time is recorded, and it is printed later in the state dump
@@ -198,12 +270,49 @@ static void thread_exit(thr_t *t) {
     if (t->closed) thr_free(t);
     pthread_mutex_unlock(&G);
     pthread_exit(NULL);
+#endif
 }
+#ifdef __ANDROID__
+static void thread_finish(thr_t *t) {
+    pthread_mutex_lock(&G);
+    t->exit_ns = now_ns(); t->exit_tick = dm_thread_tick_fn ? dm_thread_tick_fn() : 0;
+    t->exited = 1;
+    for (thr_t *w = g_wait; w; ) { thr_t *next = w->next; if (w->wkind == 4) wake(w, -1); w = next; }
+    pthread_setspecific(g_keythr, NULL);
+    if (t->closed) thr_free(t);
+    pthread_mutex_unlock(&G);
+}
+static void thread_attachment_destroy(void *p) { if (p) thread_finish(p); }
+void dm_android_kernel_thread_finish_current(void) {
+    thr_t *t = thread_current();
+    if (t) thread_finish(t);
+}
+#endif
 void dm_thread_returned(void) { die("客体线程入口函数返回（Horizon 要求 ExitThread）"); }
 
 // 主线程登记，返回其句柄（交给 nnosInitialize 作主线程句柄）
 // Register the main thread and return its handle (passed to nnosInitialize as the main thread handle)
 uint32_t svc_thread_main_init(void) {
+#ifdef __ANDROID__
+    thr_t *existing = thread_current();
+    if (existing) return existing->handle;
+    thr_t *t = calloc(1, sizeof *t);
+    if (!t) return 0;
+    if (pthread_cond_init(&t->cv, NULL)) { free(t); return 0; }
+    t->started = 1; t->prio = 44; t->core = 0; t->mask = 7; t->pt = pthread_self();
+    thread_host_metadata(t);
+    pthread_mutex_lock(&G);
+    t->handle = h_new(O_THREAD, t);
+    if (!t->handle) { pthread_mutex_unlock(&G); pthread_cond_destroy(&t->cv); free(t); return 0; }
+    t->id = g_next_id++; t->all = g_all; g_all = t;
+    pthread_mutex_unlock(&G);
+    if (pthread_setspecific(g_keythr, t)) {
+        pthread_mutex_lock(&G); g_h[t->handle - 0x1000].type = O_FREE;
+        g_h[t->handle - 0x1000].obj = NULL; thr_free(t); pthread_mutex_unlock(&G);
+        return 0;
+    }
+    return t->handle;
+#else
     pthread_key_create(&g_keythr, NULL);
     thr_t *t = calloc(1, sizeof *t);
     pthread_cond_init(&t->cv, NULL);
@@ -213,11 +322,22 @@ uint32_t svc_thread_main_init(void) {
     qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0;
     pthread_get_qos_class_np(pthread_self(), &qc, &rp); t->qos = (uint32_t)qc;
     return t->handle;
+#endif
 }
 
 static uint64_t g_main_yield_n, g_main_yield_ns;   // 只有客体主线程写；诊断行在同一线程读 | Written only by the guest main thread; the diagnostic line reads it on the same thread
 void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = g_main_yield_n; *ns = g_main_yield_ns; }
 uint32_t dm_guest_work_qos(unsigned *count) {
+#ifdef __ANDROID__
+    // Android has no Apple QoS classes. UINT32_MAX explicitly means unavailable;
+    // real scheduler policy/priority are recorded separately in each object.
+    unsigned n = 0;
+    pthread_mutex_lock(&G);
+    for (thr_t *t = g_all; t; t = t->all) if (t->worker && !t->exited) n++;
+    pthread_mutex_unlock(&G);
+    if (count) *count = n;
+    return UINT32_MAX;
+#else
     uint32_t qos = QOS_CLASS_UNSPECIFIED; unsigned n = 0;
     pthread_mutex_lock(&G);
     for (thr_t *t = g_all; t; t = t->all) {
@@ -228,6 +348,7 @@ uint32_t dm_guest_work_qos(unsigned *count) {
     pthread_mutex_unlock(&G);
     if (count) *count = n;
     return qos;
+#endif
 }
 
 // ---------- 同步对象 ----------
@@ -258,10 +379,22 @@ void dm_guest_clock_advanced(void) {
 // Handle thread / synchronization SVCs; returns 1 = handled
 static const char *thr_name(thr_t *t, char *nb, size_t n) {   // SDK ThreadType+0x1a0 = 名字指针 | SDK ThreadType+0x1a0 = name pointer
     if (!t->arg) return t->handle == 0x1001 ? "主线程" : "?";
+#ifdef __ANDROID__
+    if (!n || t->arg > UINT64_MAX - 0x1a0) return "?";
+    uint64_t np = 0;
+    struct iovec local = {&np, sizeof np}, remote = {(void *)(t->arg + 0x1a0), sizeof np};
+    if (syscall(SYS_process_vm_readv, getpid(), &local, 1, &remote, 1, 0) != sizeof np || !np) return "?";
+    local.iov_base = nb; local.iov_len = n - 1;
+    remote.iov_base = (void *)np; remote.iov_len = n - 1;
+    ssize_t got = syscall(SYS_process_vm_readv, getpid(), &local, 1, &remote, 1, 0);
+    if (got < 0) return "?";
+    nb[got] = 0; return nb;
+#else
     uint64_t np = 0; vm_size_t got = 0;
     if (vm_read_overwrite(mach_task_self(), t->arg + 0x1a0, 8, (vm_address_t)&np, &got) || !np ||
         vm_read_overwrite(mach_task_self(), np, n - 1, (vm_address_t)nb, &got)) return "?";
     nb[got] = 0; return nb;
+#endif
 }
 // 全部活着的客体线程（采样器 DM_SAMPLE=毫秒:* 用）：把 pthread 填进 out，返回个数
 // All live guest threads (used by the sampler DM_SAMPLE=ms:*): fill the pthreads into out, return the count
@@ -291,7 +424,7 @@ int thr_name_of(pthread_t pt, char *out, size_t n) {
     pthread_mutex_unlock(&G);
     return ok;
 }
-uint32_t thr_cur_handle(void) { thr_t *t = pthread_getspecific(g_keythr); return t ? t->handle : 0; }   // 只读 TSD，信号处理里可用 | Only reads TSD, usable in a signal handler
+uint32_t thr_cur_handle(void) { thr_t *t = thread_current(); return t ? t->handle : 0; }   // 只读 TSD，信号处理里可用 | Only reads TSD, usable in a signal handler
 // 按线程名找活着的客体线程（采样器用）；找不到返回 0
 // Find a live guest thread by thread name (used by the sampler); returns 0 if not found
 int thr_find_by_name(const char *name, pthread_t *out) {
@@ -305,6 +438,7 @@ int thr_find_by_name(const char *name, pthread_t *out) {
 // 现场导出时取别的客体线程的回溯：暂停 → 读寄存器 → 沿帧指针链走（客体与门块都保持 x29 链）→ 恢复；只打 main / sdk 帧
 // State dump (called from crash.c on watchdog / crash; read-only, takes no lock): what each guest thread is waiting on and where its most recent SVC was issued from
 // During a state dump, take the backtrace of other guest threads: suspend → read registers → walk the frame pointer chain (both guest code and gate blocks keep the x29 chain) → resume; only main / sdk frames are printed
+#ifndef __ANDROID__
 static void thr_bt(thr_t *t) {
     if (!t->mport || t->exited || t->mport == mach_thread_self()) return;
     if (thread_suspend(t->mport) != KERN_SUCCESS) return;
@@ -434,12 +568,110 @@ void svc_thread_dump(void) {
         vm_deallocate(mach_task_self(), (vm_address_t)ths, nth * sizeof *ths);
     }
 }
+#else
+void svc_thread_dump(void) {
+    // A crash can interrupt a holder of G: never deadlock a diagnostic dump.
+    if (pthread_mutex_trylock(&G)) { LOG("Android thread metadata busy; register sampling unavailable"); return; }
+    for (thr_t *t = g_all; t; t = t->all) {
+        char name[64];
+        LOG("Android thread %#x tid=%d name=%s prio=%d core=%d mask=%#llx policy=%d host_priority=%d started=%d exited=%d wait=%d addr=%#llx svc=%#x lr=%#llx",
+            t->handle, t->host_tid, thr_name(t, name, sizeof name), t->prio, t->core,
+            (unsigned long long)t->mask, t->host_policy, t->host_priority, t->started, t->exited,
+            t->wkind, (unsigned long long)t->waddr, t->last_svc, (unsigned long long)t->last_lr);
+    }
+    LOG("Android cross-thread register/backtrace sampling unavailable (not measured)");
+    pthread_mutex_unlock(&G);
+}
+#endif
 
 int svc_thread(int num, uint64_t *regs) {
-    { thr_t *me = pthread_getspecific(g_keythr); if (me) { me->last_svc = num; me->last_lr = regs[30]; me->nsvc++; } }
-    if (g_flag.thr && num != 0x0B) { thr_t *me = pthread_getspecific(g_keythr); LOG("[%#x] svc %#x x0=%#llx x1=%#llx x2=%#llx x3=%#llx", me ? me->handle : 0, num, regs[0], regs[1], regs[2], regs[3]); }
+#ifdef __ANDROID__
+    pthread_mutex_lock(&G);
+#endif
+    { thr_t *me = thread_current(); if (me) { me->last_svc = num; me->last_lr = regs[30]; me->nsvc++; } }
+#ifdef __ANDROID__
+    pthread_mutex_unlock(&G);
+    uint64_t addr = 0, second = 0;
+    if (num == 0x1A) addr = regs[1];
+    if (num == 0x1B || num == 0x1C || num == 0x34 || num == 0x35) addr = regs[0];
+    if (num == 0x1C || num == 0x1D) second = num == 0x1C ? regs[1] : regs[0];
+    if ((addr && (addr % 4 || !dm_android_kernel_memory_accessible(addr, 4, 1))) ||
+        (second && (second % 4 || !dm_android_kernel_memory_accessible(second, 4, 1))) ||
+        ((num == 0x1A || num == 0x1B || num == 0x1C || num == 0x34 || num == 0x35) && !addr) ||
+        ((num == 0x1C || num == 0x1D) && !second) ||
+        (num == 0x18 && ((int)regs[2] < 0 || regs[2] > 64 ||
+          (regs[2] && !dm_android_kernel_memory_accessible(regs[1], (size_t)regs[2] * 4, 0))))) {
+        regs[0] = R_BAD_STATE; return 1;
+    }
+#endif
+    if (g_flag.thr && num != 0x0B) { thr_t *me = thread_current(); LOG("[%#x] svc %#x x0=%#llx x1=%#llx x2=%#llx x3=%#llx", me ? me->handle : 0, num, (unsigned long long)regs[0], (unsigned long long)regs[1], (unsigned long long)regs[2], (unsigned long long)regs[3]); }
+#ifdef __ANDROID__
+    if ((num >= 0x0C && num <= 0x10) || num == 0x25) {
+        pthread_mutex_lock(&G);
+        uint32_t handle = num == 0x10 ? H_CUR_THREAD :
+                          num == 0x0C || num == 0x25 ? (uint32_t)regs[1] :
+                          num == 0x0E ? (uint32_t)regs[2] : (uint32_t)regs[0];
+        thr_t *t = h_peek(handle, O_THREAD);
+        uint64_t r = t ? 0 : R_BAD_HANDLE;
+        if (t) switch (num) {
+        case 0x0C: regs[1] = (uint64_t)t->prio; break;
+        case 0x0D: if (regs[1] > 63) r = R_BAD_STATE; else t->prio = (int)regs[1]; break;
+        case 0x0E: regs[1] = (uint64_t)(uint32_t)t->core; regs[2] = t->mask; break;
+        case 0x0F: {
+            int c = (int)regs[1];
+            if (c > 63) { r = R_BAD_STATE; break; }
+            if (c >= 0) t->core = c; else if (c == -1) t->core = 0;
+            if (regs[2]) t->mask = regs[2]; break;
+        }
+        case 0x10: r = (uint64_t)(uint32_t)t->core; break;
+        case 0x25: regs[1] = t->id; break;
+        }
+        pthread_mutex_unlock(&G);
+        regs[0] = r; return 1;
+    }
+#endif
     switch (num) {
     case 0x08: {  // CreateThread(→w1 句柄; x1 入口, x2 参数, x3 栈顶, w4 优先级, w5 核) | CreateThread(→w1 handle; x1 entry, x2 argument, x3 stack top, w4 priority, w5 core)
+#ifdef __ANDROID__
+        uint64_t bottom = 0; size_t size = 0;
+        if (!regs[1] || regs[1] % 4 || regs[3] % 16 ||
+            (int)regs[4] < 0 || regs[4] > 63 || (int)regs[5] > 63 ||
+            !dm_android_kernel_stack_pin(regs[3], &bottom, &size)) {
+            regs[0] = R_BAD_STATE; regs[1] = 0; return 1;
+        }
+        if (regs[3] - bottom < 4096) {
+            dm_android_kernel_stack_unpin(bottom); regs[0] = R_BAD_STATE; regs[1] = 0; return 1;
+        }
+        thr_t *t = calloc(1, sizeof *t);
+        if (!t) { dm_android_kernel_stack_unpin(bottom); regs[0] = R_OUT_OF_RES; regs[1] = 0; return 1; }
+        if (pthread_cond_init(&t->cv, NULL)) {
+            free(t); dm_android_kernel_stack_unpin(bottom); regs[0] = R_OUT_OF_RES; regs[1] = 0; return 1;
+        }
+        t->entry = regs[1]; t->arg = regs[2]; t->stack_top = regs[3]; t->stack_pin = bottom;
+        t->prio = (int)regs[4]; t->core = (int)regs[5]; t->mask = t->core >= 0 ? 1ull << t->core : 7;
+        t->worker = 1; t->born_ns = now_ns(); t->born_tick = dm_thread_tick_fn ? dm_thread_tick_fn() : 0;
+        pthread_attr_t a;
+        int error = pthread_attr_init(&a);
+        int attr_initialized = !error;
+        if (!error) error = pthread_attr_setstacksize(&a, 1 << 20);
+        if (!error) error = pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+        pthread_mutex_lock(&G);
+        if (!error) {
+            t->handle = h_new(O_THREAD, t);
+            if (!t->handle) error = EAGAIN;
+        }
+        if (!error) error = pthread_create(&t->pt, &a, thread_main, t);
+        if (attr_initialized) pthread_attr_destroy(&a);
+        if (error) {
+            if (t->handle) { g_h[t->handle - 0x1000].type = O_FREE; g_h[t->handle - 0x1000].obj = NULL; }
+            pthread_mutex_unlock(&G); pthread_cond_destroy(&t->cv); free(t);
+            dm_android_kernel_stack_unpin(bottom); regs[0] = R_OUT_OF_RES; regs[1] = 0; return 1;
+        }
+        t->id = g_next_id++; t->all = g_all; g_all = t;
+        uint32_t handle = t->handle;
+        pthread_mutex_unlock(&G);
+        regs[0] = 0; regs[1] = handle; return 1;
+#else
         thr_t *t = calloc(1, sizeof *t);
         pthread_cond_init(&t->cv, NULL);
         t->entry = regs[1]; t->arg = regs[2]; t->stack_top = regs[3] & ~0xFull;
@@ -452,13 +684,21 @@ int svc_thread(int num, uint64_t *regs) {
         pthread_attr_destroy(&a);
         if (g_flag.thr) LOG("CreateThread h=%#x entry=%#llx arg=%#llx sp=%#llx prio=%d core=%d", t->handle, t->entry, t->arg, t->stack_top, t->prio, t->core);
         regs[0] = 0; regs[1] = t->handle; return 1;
+#endif
     }
     case 0x09: {  // StartThread(w0)
         pthread_mutex_lock(&G);
         thr_t *t = h_get((uint32_t)regs[0], O_THREAD);
+#ifdef __ANDROID__
+        int64_t r = !t ? R_BAD_HANDLE : t->started || t->exited ? R_BAD_STATE : 0;
+        if (!r) { t->started = 1; pthread_cond_signal(&t->cv); }
+        pthread_mutex_unlock(&G);
+        regs[0] = (uint64_t)r; return 1;
+#else
         if (t) { t->started = 1; pthread_cond_signal(&t->cv); }
         pthread_mutex_unlock(&G);
         regs[0] = t ? 0 : R_BAD_HANDLE; return 1;
+#endif
     }
     case 0x0A: thread_exit(cur()); return 1;
     case 0x0B: {  // SleepThread(x0 ns)；0/-1/-2 = 各类让出 | SleepThread(x0 ns); 0/-1/-2 = the various kinds of yield
@@ -469,11 +709,11 @@ int svc_thread(int num, uint64_t *regs) {
             while (guest_ns() < deadline) { struct timespec ts = {0, 1000000}; nanosleep(&ts, 0); }
         } else if (ns > 0) { struct timespec ts = {ns / 1000000000, ns % 1000000000}; nanosleep(&ts, 0); }
         else {   // 让出（0 / -1 / -2）。主线程的让出次数与耗时记账：游戏渲染任务图「等全部做完」是纯轮询 + 让出（main+0x15ee898），量它占一帧多少 | Yield (0 / -1 / -2). Count and time of the main thread's yields are recorded: the game's render task graph "wait for everything to finish" is pure polling + yield (main+0x15ee898); measure how much of a frame it takes
-            thr_t *me = pthread_getspecific(g_keythr);
+            thr_t *me = thread_current();
             if (me && me->handle == 0x1001) { uint64_t y0 = now_ns(); sched_yield(); g_main_yield_ns += now_ns() - y0; g_main_yield_n++; }
             else sched_yield();
         }
-        if (g_flag.bootprof) { uint64_t d = now_ns() - t0; dm_prof_add(PROF_SLEEP, d, 0); thr_t *me = pthread_getspecific(g_keythr); if (me && me->handle == 0x1001) dm_prof_add(PROF_MAIN_WAIT, d, 0); }
+        if (g_flag.bootprof) { uint64_t d = now_ns() - t0; dm_prof_add(PROF_SLEEP, d, 0); thr_t *me = thread_current(); if (me && me->handle == 0x1001) dm_prof_add(PROF_MAIN_WAIT, d, 0); }
         return 1;
     }
     case 0x0C: { thr_t *t = h_get((uint32_t)regs[1], O_THREAD); regs[0] = t ? 0 : R_BAD_HANDLE; regs[1] = t ? (uint64_t)t->prio : 0; return 1; }
@@ -553,11 +793,19 @@ int svc_thread(int num, uint64_t *regs) {
         int nw = 0; for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 3 && w->waddr == addr) nw++;
         int64_t r = 0;
         if (type != 0) {
+#ifdef __ANDROID__
+            uint32_t nv = (uint32_t)val + 1u;
+            if (type == 2) {
+                if (cnt <= 0) nv = nw > 0 ? (uint32_t)val - 1u : (uint32_t)val + 1u;
+                else nv = nw == 0 ? (uint32_t)val + 1u : nw <= cnt ? (uint32_t)val - 1u : (uint32_t)val;
+            }
+#else
             int32_t nv = val + 1;
             if (type == 2) {
                 if (cnt <= 0) nv = nw > 0 ? val - 1 : val + 1;
                 else nv = nw == 0 ? val + 1 : nw <= cnt ? val - 1 : val;
             }
+#endif
             uint32_t e = (uint32_t)val;
             if (!cas32(addr, &e, (uint32_t)nv)) r = R_BAD_STATE;
         }
@@ -568,8 +816,24 @@ int svc_thread(int num, uint64_t *regs) {
     }
 
     case 0x45: {  // CreateEvent(→w1 写端, w2 读端) | CreateEvent(→w1 write end, w2 read end)
-        event_t *e = calloc(1, sizeof *e); e->refs = 2;
+        event_t *e = calloc(1, sizeof *e);
+#ifdef __ANDROID__
+        if (!e) { regs[0] = R_OUT_OF_RES; regs[1] = regs[2] = 0; return 1; }
+#endif
+        e->refs = 2;
+#ifdef __ANDROID__
+        pthread_mutex_lock(&G);
+        uint32_t hw = h_new(O_EVENT_W, e), hr = hw ? h_new(O_EVENT_R, e) : 0;
+        if (!hw || !hr) {
+            if (hw) { g_h[hw - 0x1000].type = O_FREE; g_h[hw - 0x1000].obj = NULL; }
+            pthread_mutex_unlock(&G); free(e);
+            regs[0] = R_OUT_OF_RES; regs[1] = regs[2] = 0; return 1;
+        }
+        se_created(hw, e);
+        pthread_mutex_unlock(&G);
+#else
         pthread_mutex_lock(&G); uint32_t hw = h_new(O_EVENT_W, e), hr = h_new(O_EVENT_R, e); pthread_mutex_unlock(&G);
+#endif
         regs[0] = 0; regs[1] = hw; regs[2] = hr; return 1;
     }
     case 0x11: case 0x12: case 0x17: {  // SignalEvent(写端) / ClearEvent(任一端) / ResetSignal(读端，未触发报错) | SignalEvent(write end) / ClearEvent(either end) / ResetSignal(read end, error if not signaled)
@@ -617,14 +881,26 @@ int svc_thread(int num, uint64_t *regs) {
         pthread_mutex_lock(&G);
         unsigned i = (uint32_t)regs[0] - 0x1000;
         if (i > 0 && i < MAX_H && (g_h[i].type == O_EVENT_R || g_h[i].type == O_EVENT_W)) {
-            event_t *e = g_h[i].obj; if (--e->refs == 0) free(e);
+            event_t *e = g_h[i].obj;
+#ifdef __ANDROID__
+            if (g_h[i].type == O_EVENT_W) se_closed((uint32_t)regs[0], e);
+#endif
+            if (--e->refs == 0) free(e);
             g_h[i].type = O_FREE; g_h[i].obj = NULL;
         } else if (i > 0 && i < MAX_H && g_h[i].type == O_THREAD) {
             thr_t *t = g_h[i].obj;
             g_h[i].type = O_FREE; g_h[i].obj = NULL;
             t->closed = 1;
+#ifdef __ANDROID__
+            // A created-but-never-started pthread must leave its parked wait.
+            if (!t->started) pthread_cond_signal(&t->cv);
+#endif
             if (t->exited) thr_free(t);
         }
+#ifdef __ANDROID__
+        else { pthread_mutex_unlock(&G); regs[0] = R_BAD_HANDLE; return 1; }
+        wake_sync_waiters();
+#endif
         pthread_mutex_unlock(&G);
         regs[0] = 0; return 1;
     }
@@ -638,9 +914,162 @@ int svc_thread(int num, uint64_t *regs) {
 // ---------- SystemEvent of the service layer ----------
 // Real device: the service hands the read end of a kernel event to the client, and the guest waits on it through SDK nn::os. Host: on a guest thread, call the SDK's own
 // CreateSystemEvent(inter-process=true), and the SDK creates the kernel event through SVC 0x45; the write-end handle is recorded, after which any thread (including the host audio thread) can signal it.
+#ifdef __ANDROID__
+enum { SE_EMPTY, SE_BINDING, SE_BOUND, SE_RETIRED };
+typedef struct system_binding {
+    void *ev;
+    uint32_t wh;
+    event_t *object;
+    int state, destroyed;
+} system_binding;
+// G protects both event objects and bindings. SDK calls release G and hold a
+// per-address reservation, so no SDK SVC recursively locks G and no second lock
+// can invert reset/CloseHandle/signal ordering.
+static system_binding g_se[512];
+static pthread_cond_t g_se_changed = PTHREAD_COND_INITIALIZER;
+static _Thread_local system_binding *g_se_creating;
+static uint64_t g_se_retired_signals;
+#ifdef DM_TEST_HOOKS
+void (*dm_test_system_event_waiting)(void *);
+#endif
+static void se_wait_binding(void *ev) { // Caller holds G; wait releases it.
+#ifdef DM_TEST_HOOKS
+    if (dm_test_system_event_waiting) dm_test_system_event_waiting(ev);
+#else
+    (void)ev;
+#endif
+    pthread_cond_wait(&g_se_changed, &G);
+}
+#else
 static struct { void *ev; uint32_t wh; } g_se[512];
-static int g_nse;
 static pthread_mutex_t g_se_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
+static int g_nse;
+#ifdef __ANDROID__
+int dm_android_kernel_threads_quiescent_except_current(void) {
+    thr_t *current = thread_current();
+    pthread_mutex_lock(&G);
+    int quiescent = g_wait == NULL;
+    for (thr_t *t = g_all; quiescent && t; t = t->all)
+        if (t != current && !t->exited) quiescent = 0;
+    pthread_mutex_unlock(&G);
+    return quiescent;
+}
+int dm_android_kernel_threads_reset(void) {
+    // Never delete/recreate the Bionic key: other persistent JNI pthreads may
+    // still have a TSD slot. Every live attachment must explicitly finish or
+    // run its key destructor before its object can be reclaimed here.
+    pthread_mutex_lock(&G);
+    for (thr_t *t = g_all; t; t = t->all) if (!t->exited) {
+        pthread_mutex_unlock(&G); return 0;
+    }
+    if (g_wait) { pthread_mutex_unlock(&G); return 0; }
+    for (int i = 1; i < MAX_H; i++) {
+        if (g_h[i].type == O_EVENT_R || g_h[i].type == O_EVENT_W) {
+            event_t *e = g_h[i].obj;
+            if (--e->refs == 0) free(e);
+        }
+        g_h[i].type = O_FREE; g_h[i].obj = NULL;
+    }
+    while (g_all) thr_free(g_all);
+    g_next_id = 0x51; g_wseq = 0;
+    g_main_yield_n = g_main_yield_ns = 0;
+    memset(g_se, 0, sizeof g_se); g_nse = 0;
+    g_se_retired_signals = 0;
+    pthread_mutex_unlock(&G);
+    return 1;
+}
+void dm_android_kernel_thread_stats(unsigned *handles, unsigned *live, unsigned *objects) {
+    int h, l, o;
+    thr_counts(&h, &l, &o);
+    if (handles) *handles = (unsigned)h;
+    if (live) *live = (unsigned)l;
+    if (objects) *objects = (unsigned)o;
+}
+#endif
+#ifdef __ANDROID__
+static system_binding *se_lookup(void *ev) { // Caller holds G.
+    for (int i = 0; i < g_nse; ++i) if (g_se[i].ev == ev) return &g_se[i];
+    return NULL;
+}
+static void se_created(uint32_t writable, event_t *event) { // Caller holds G.
+    if (g_se_creating) {
+        g_se_creating->wh = writable;
+        g_se_creating->object = event;
+    }
+}
+static void se_closed(uint32_t writable, event_t *event) { // Caller holds G.
+    for (int i = 0; i < g_nse; ++i) {
+        system_binding *b = &g_se[i];
+        if (b->wh != writable || b->object != event) continue;
+        b->wh = 0; b->object = NULL; b->destroyed = 1;
+        // Keep an in-flight reservation until its SDK caller returns. Waiters
+        // cannot reuse its storage while that caller's compiler-TLS points here.
+        if (b->state == SE_BOUND) b->state = SE_RETIRED;
+    }
+    pthread_cond_broadcast(&g_se_changed);
+}
+// Weak only for the historical CV-only executable, which intentionally does
+// not link guest invocation. Binding still explicitly rejects a missing state;
+// production and the complete kernel contract link the actual accessor.
+extern struct DmGuestThreadState *dm_android_peek_guest_state(void) __attribute__((weak));
+void hle_bind_system_event(void *ev, int autoclear) {
+    if (!ev) die("SystemEvent null binding address");
+    pthread_mutex_lock(&G);
+    system_binding *b = se_lookup(ev);
+    while (b && b->state == SE_BINDING) { se_wait_binding(ev); b = se_lookup(ev); }
+    if (b && b->state == SE_BOUND) { pthread_mutex_unlock(&G); return; }
+    if (!thread_current() || !dm_android_peek_guest_state || !dm_android_peek_guest_state()) {
+        pthread_mutex_unlock(&G); die("hle_bind_system_event requires an attached guest kernel thread");
+    }
+    if (!b) {
+        if (g_nse < (int)(sizeof g_se / sizeof g_se[0])) b = &g_se[g_nse++];
+        else for (int i = 0; i < g_nse; ++i) if (g_se[i].state == SE_RETIRED) { b = &g_se[i]; break; }
+    }
+    if (!b) { pthread_mutex_unlock(&G); die("SystemEvent live binding table full"); }
+    *b = (system_binding){.ev = ev, .state = SE_BINDING};
+    pthread_mutex_unlock(&G);
+    uint32_t (*create)(void *, int, int) = guest_sym("_ZN2nn2os17CreateSystemEventEPNS0_15SystemEventTypeENS0_14EventClearModeEb");
+    uint32_t (*getw)(const void *) = guest_sym("_ZN2nn2os30GetWritableHandleOfSystemEventEPKNS0_15SystemEventTypeE");
+    if (!create || !getw) die("SDK SystemEvent symbols unavailable");
+    system_binding *previous = g_se_creating;
+    g_se_creating = b;
+    uint32_t result = create(ev, autoclear, 1);
+    uint32_t writable = result ? 0 : getw(ev);
+    g_se_creating = previous;
+    pthread_mutex_lock(&G);
+    int destroyed = b->destroyed;
+    int valid = !result && !destroyed && writable == b->wh && b->object && h_peek(writable, O_EVENT_W) == b->object;
+    b->state = valid ? SE_BOUND : SE_RETIRED;
+    if (!valid) { b->wh = 0; b->object = NULL; }
+    pthread_cond_broadcast(&g_se_changed);
+    pthread_mutex_unlock(&G);
+    if (result) die("CreateSystemEvent failed %#x", result);
+    if (!valid && !destroyed) die("SDK SystemEvent writable handle does not match its created event");
+}
+void hle_signal_system_event(void *ev) {
+    pthread_mutex_lock(&G);
+    system_binding *b = se_lookup(ev);
+    while (b && b->state == SE_BINDING) { se_wait_binding(ev); b = se_lookup(ev); }
+    if (b && b->state == SE_RETIRED) {
+        // A late asynchronous callback cannot resurrect a destroyed event or
+        // signal a different object occupying its recycled handle slot.
+        if (++g_se_retired_signals == 1) LOG("SystemEvent signal dropped for retired binding %p", ev);
+        pthread_mutex_unlock(&G); return;
+    }
+    if (!b) {
+        pthread_mutex_unlock(&G);
+        // An unknown unbound host callback remains an explicit error. The
+        // binder permits on-demand SDK creation only on an attached guest.
+        hle_bind_system_event(ev, 0);
+        hle_signal_system_event(ev); return;
+    }
+    event_t *event = h_peek(b->wh, O_EVENT_W);
+    if (!event || event != b->object) { pthread_mutex_unlock(&G); die("SystemEvent binding identity lost"); }
+    event->signaled = 1; wake_sync_waiters();
+    pthread_mutex_unlock(&G);
+}
+#else
 static uint32_t se_find(void *ev) {
     for (int i = 0; i < g_nse; i++) if (g_se[i].ev == ev) return g_se[i].wh;
     return 0;
@@ -648,10 +1077,18 @@ static uint32_t se_find(void *ev) {
 void hle_bind_system_event(void *ev, int autoclear) {      // 必须在客体线程上调（要执行 SDK 代码） | Must be called on a guest thread (it has to execute SDK code)
     pthread_mutex_lock(&g_se_lock); uint32_t wh = se_find(ev); pthread_mutex_unlock(&g_se_lock);
     if (wh) return;
-    if (!pthread_getspecific(g_keythr)) die("hle_bind_system_event 须在客体线程上调用");
+    if (!thread_current()) die("hle_bind_system_event 须在客体线程上调用");
+#ifdef __ANDROID__
+    // Resolved from the pinned current SDK on each invocation; a previous
+    // runtime's entry pointers cannot survive module replacement.
+    uint32_t (*create)(void *, int, int) = guest_sym("_ZN2nn2os17CreateSystemEventEPNS0_15SystemEventTypeENS0_14EventClearModeEb");
+    uint32_t (*getw)(const void *) = guest_sym("_ZN2nn2os30GetWritableHandleOfSystemEventEPKNS0_15SystemEventTypeE");
+    if (!create || !getw) die("SDK SystemEvent symbols unavailable");
+#else
     static uint32_t (*create)(void *, int, int); static uint32_t (*getw)(const void *);
     if (!create) { create = guest_sym("_ZN2nn2os17CreateSystemEventEPNS0_15SystemEventTypeENS0_14EventClearModeEb");
                    getw = guest_sym("_ZN2nn2os30GetWritableHandleOfSystemEventEPKNS0_15SystemEventTypeE"); }
+#endif
     uint32_t r = create(ev, autoclear, 1);
     if (r) die("CreateSystemEvent 失败 %#x", r);
     wh = getw(ev);
@@ -669,3 +1106,4 @@ void hle_signal_system_event(void *ev) {   // 未绑定的按手动清除即时�
     e->signaled = 1; wake_sync_waiters();
     pthread_mutex_unlock(&G);
 }
+#endif
