@@ -120,3 +120,30 @@ Independent unseen cross-build source testing of two D2R original functions yiel
 SDK022/frozen026 has CLOSED at `0x373b5c: host gate in exclusive window starting 0x373b50`, crossing `0x373940`; inputs, outputs and original function remain unchanged. Main013 still runs older frozen025 without a terminal. The next repair is a bounded cohort comparison of known SDK WFE functions; no guessed entry is admitted.
 
 Own034b V1 diagnostic now executes the directed live-LDAXR/SVC36/STXR case on both S8 and S24: each reports prefixVerified=true, STXR status1, unchanged cell, two SVC36 calls and previous10mutex/4contention cases. Exact loaded gate starts CLREX before frame, with typed symbol/capsule/branch/dispatch checks. Static ELF confirms local-hidden helper, no named GOT, exact19instructions/48Bframe/soleBLRX20, all86owned fixed-x18 compile commands,243RELATIVE0ABS64 and original14TLS closure calls. Both packages stopped/PIDs absent; both phones explicitly released. Source section and first-binary exported-GOT errors were caught and preserved before the successful hidden-helper rebuild. No original SDK/game or nonzero-pin execution is claimed. See separate coordination outputs/svc36-retirement-034 report and immutable raw logs.
+
+
+## Loader convergence checkpoint049
+
+Current accepted source: finite six wait-layout data rows037 and two main
+conditional-atomic rows042, plus equivalent per-plan direct-entry index041.
+The original scanner remains the fallback/reference; all selected sources,
+metadata-first rules, earliest witnesses and typed transfer checks remain.
+Independent source reviews044/046/047 accepted; ROOT641 available Android
+tests PASS72.478s,18 inherited missing-fixture instances excluded. RuffF,
+compile4sources, diff-check and unchanged native-wait generator check PASS.
+
+Full results supersede earlier running statuses: main013/frozen025 refused
+28bd84; SDK022/frozen026 refused373b5c. main014 now independently retries
+main using frozen027 manifest37a2ec3c5a3498f7ad7573d5ae12b17e95e10f09e57e8276596615db77bf2925.
+It is not final consistent three-module publication.
+
+039 generic runtime/ticket/readwait chain remains PRIVATE: independent045
+found coordinated package-bit/receipt removal accepted by both generators.
+048 is fixing source-derived necessity; no provider may use039 as-is.
+040/043 epilogue accepted separately: actual55/62/combined117 bounded source
+codegen PASS; this does not clear039 publication gate. Own originalSDK/nnMain
+NOT_RUN, first originalframe NOT_OBSERVED, compiledprovider absent.
+
+Own034b SVC36 retirement synthetic probe passed bothS8/S24 and both devices
+were explicitly released. ExternalEden1.1.1 full song/results/save/freshPID
+readback remains complete; video has no audio, AVsync/latency not assessed.

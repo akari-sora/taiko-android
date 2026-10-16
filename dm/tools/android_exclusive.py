@@ -205,8 +205,9 @@ def require_acyclic(nodes, by_pc, retries, exits, api):
 def require_single_entry(nodes, entry, instructions, entry_offsets, api):
     if (set(entry_offsets) & nodes) - {entry}:
         raise api.RewriteError(f'0x{entry:x}: external entry in exclusive region interior')
+    interior = nodes - {entry}
     for ins in instructions:
-        if ins.address not in nodes and any(target in nodes - {entry} for target in successors(ins)):
+        if ins.address not in nodes and any(target in interior for target in successors(ins)):
             raise api.RewriteError(f'0x{ins.address:x}: external entry into exclusive region interior')
 
 
@@ -525,6 +526,8 @@ NATIVE_CONDITIONAL_WORDS = (
         0x6B0A017F, 0x2A0A03E8, 0x54FFFDC1,
     ),
     (0xF9000049, 0x9100050A, 0x5280002B, 0xC87F340C, 0xEB0801BF, 0x540000A1, 0xEB09019F, 0x54000061, 0xC82BA801, 0x35FFFF4B, 0xD5033F5F, 0xAA0D03E8, 0xAA0C03E9, 0xB5FFFE6B),
+    (0x910202C9, 0xC85F7D28, 0xC80AFD20, 0x35FFFFAA),
+    (0xC808FF53, 0x340001E8, 0xC85FFF48, 0xB4FFFFA8, 0xD5033F5F),
 )
 NATIVE_CONDITIONAL_FIELDS = (
     ((0,5),(5,16),(),(5,),(),(0,16),(),(0,5),(5,16),(),
@@ -571,6 +574,8 @@ NATIVE_CONDITIONAL_FIELDS = (
     ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
     ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
     ((0, 5), (0, 5), (0,), (0, 5, 10), (0, 5, 16), (), (0, 5, 16), (), (0, 5, 10, 16), (0,), (), (0, 5, 16), (0, 5, 16), (0,)),
+    ((0, 5), (0, 5), (0, 5, 16), (0,)),
+    ((0, 5, 16), (0,), (0, 5), (0,), ()),
 )
 
 
@@ -626,10 +631,106 @@ NATIVE_WAIT_MUTEX_SPARSE_OFFSETS = (0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44,
 
 # Exact source offsets permit the closed ordinary payload gap in the sparse
 # layout; its branches, TLR identity, cells, ordering and exits remain fixed.
+NATIVE_WAIT_MUTEX_COHORT_A_WORDS = (
+    0x794202C8, 0xAA0103F4, 0xAA0003F3, 0x91006015,
+    0xF98002B0, 0x11000517, 0x34000228, 0x52800029,
+    0x790202D7, 0x885FFEAA, 0x340000CA, 0x790202C8,
+    0xD503205F, 0x790202D7, 0x885FFEAA, 0x35FFFF8A,
+    0x880A7EA9, 0x3400030A, 0x790202C8, 0x790202D7,
+    0x885FFEAA, 0x35FFFECA, 0x17FFFFFA, 0x52800038,
+    0x14000002, 0xD503205F, 0x790202D7, 0x885FFEA8,
+    0x340000C8, 0x790202DF, 0x794206C8, 0x34FFFF48,
+    0x9401650D, 0x17FFFFF8, 0x88087EB8, 0x340000C8,
+    0x790202DF, 0x794206C8, 0x34FFFE88, 0x94016506,
+    0x17FFFFF2,
+)
+NATIVE_WAIT_MUTEX_COHORT_A_FIELDS = ((0, 5), (0, 16), (0, 16), (0, 5), (5,), (0, 5), (0,), (0,), (0, 5), (0, 5), (0,), (0, 5), (), (0, 5), (0, 5), (0,), (0, 5, 16), (0,), (0, 5), (0, 5), (0, 5), (0,), (), (0,), (), (), (0, 5), (0, 5), (0,), (0, 5), (0, 5), (0,), (), (), (0, 5, 16), (0,), (0, 5), (0, 5), (0,), (), ())
+NATIVE_WAIT_MUTEX_COHORT_A_OFFSETS = (0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160)
+
+NATIVE_WAIT_MUTEX_COHORT_B_WORDS = (
+    0x794202C8, 0xAA0103F3, 0xAA0003F4, 0x91006035,
+    0xF98002B0, 0x11000517, 0x34000868, 0x52800029,
+    0x790202D7, 0x885FFEAA, 0x350000CA, 0x1400000A,
+    0x790202C8, 0x790202D7, 0x885FFEAA, 0x340000CA,
+    0x790202C8, 0xD503205F, 0x790202D7, 0x885FFEAA,
+    0x35FFFF8A, 0x880A7EA9, 0x35FFFECA, 0x52800038,
+    0x14000002, 0xD503205F, 0x790202D7, 0x885FFEA8,
+    0x340000C8, 0x790202DF, 0x794206C8, 0x34FFFF48,
+    0x94016253, 0x17FFFFF8, 0x88087EB8, 0x34FFF848,
+    0x790202DF, 0x794206C8, 0x34FFFE88, 0x9401624C,
+    0x17FFFFF2,
+)
+NATIVE_WAIT_MUTEX_COHORT_B_OFFSETS = (0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 292, 296, 300, 304, 308, 312, 316, 320, 324, 328, 332, 336, 340, 344, 348, 352, 356, 360)
+
+NATIVE_WAIT_MUTEX_COHORT_C_WORDS = (
+    0x794202C8, 0xAA0103F3, 0xAA0003F4, 0x91006035,
+    0xF98002B0, 0x11000517, 0x34000228, 0x52800029,
+    0x790202D7, 0x885FFEAA, 0x340000CA, 0x790202C8,
+    0xD503205F, 0x790202D7, 0x885FFEAA, 0x35FFFF8A,
+    0x880A7EA9, 0x3400030A, 0x790202C8, 0x790202D7,
+    0x885FFEAA, 0x35FFFECA, 0x17FFFFFA, 0x52800038,
+    0x14000002, 0xD503205F, 0x790202D7, 0x885FFEA8,
+    0x340000C8, 0x790202DF, 0x794206C8, 0x34FFFF48,
+    0x940161F5, 0x17FFFFF8, 0x88087EB8, 0x340000C8,
+    0x790202DF, 0x794206C8, 0x34FFFE88, 0x940161EE,
+    0x17FFFFF2,
+)
+NATIVE_WAIT_MUTEX_COHORT_C_OFFSETS = (0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160)
+
+NATIVE_WAIT_MUTEX_COHORT_D_WORDS = (
+    0x79420328, 0xF98002D0, 0x1100051A, 0x35000088,
+    0x1400000E, 0x79020328, 0xD503205F, 0x7902033A,
+    0x885FFEC9, 0x35FFFF89, 0x88097ED7, 0x340002C9,
+    0x79020328, 0x7902033A, 0x885FFEC9, 0x35FFFEC9,
+    0x17FFFFFA, 0xD503205F, 0x7902033A, 0x885FFEC8,
+    0x340000C8, 0x7902033F, 0x79420728, 0x34FFFF48,
+    0x94015CCC, 0x17FFFFF8, 0x88087ED7, 0x340000C8,
+    0x7902033F, 0x79420728, 0x34FFFE88, 0x94015CC5,
+    0x17FFFFF2,
+)
+NATIVE_WAIT_MUTEX_COHORT_D_FIELDS = ((0, 5), (5,), (0, 5), (0,), (), (0, 5), (), (0, 5), (0, 5), (0,), (0, 5, 16), (0,), (0, 5), (0, 5), (0, 5), (0,), (), (), (0, 5), (0, 5), (0,), (0, 5), (0, 5), (0,), (), (), (0, 5, 16), (0,), (0, 5), (0, 5), (0,), (), ())
+NATIVE_WAIT_MUTEX_COHORT_D_OFFSETS = (0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128)
+
+NATIVE_WAIT_MUTEX_COHORT_E_WORDS = (
+    0x794202A8, 0xAA0003F3, 0x91004014, 0xF9800290,
+    0x11000516, 0x34000228, 0x52800029, 0x790202B6,
+    0x885FFE8A, 0x340000CA, 0x790202A8, 0xD503205F,
+    0x790202B6, 0x885FFE8A, 0x35FFFF8A, 0x880A7E89,
+    0x3400030A, 0x790202A8, 0x790202B6, 0x885FFE8A,
+    0x35FFFECA, 0x17FFFFFA, 0x52800037, 0x14000002,
+    0xD503205F, 0x790202B6, 0x885FFE88, 0x340000C8,
+    0x790202BF, 0x794206A8, 0x34FFFF48, 0x94015C47,
+    0x17FFFFF8, 0x88087E97, 0x340000C8, 0x790202BF,
+    0x794206A8, 0x34FFFE88, 0x94015C40, 0x17FFFFF2,
+)
+NATIVE_WAIT_MUTEX_COHORT_E_FIELDS = ((0, 5), (0, 16), (0, 5), (5,), (0, 5), (0,), (0,), (0, 5), (0, 5), (0,), (0, 5), (), (0, 5), (0, 5), (0,), (0, 5, 16), (0,), (0, 5), (0, 5), (0, 5), (0,), (), (0,), (), (), (0, 5), (0, 5), (0,), (0, 5), (0, 5), (0,), (), (), (0, 5, 16), (0,), (0, 5), (0, 5), (0,), (), ())
+NATIVE_WAIT_MUTEX_COHORT_E_OFFSETS = (0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156)
+
+NATIVE_WAIT_MUTEX_COHORT_F_WORDS = (
+    0x794202C8, 0x2A0103F4, 0xAA0003F3, 0x91004015,
+    0xF98002B0, 0x11000517, 0x34000228, 0x52800029,
+    0x790202D7, 0x885FFEAA, 0x340000CA, 0x790202C8,
+    0xD503205F, 0x790202D7, 0x885FFEAA, 0x35FFFF8A,
+    0x880A7EA9, 0x3400030A, 0x790202C8, 0x790202D7,
+    0x885FFEAA, 0x35FFFECA, 0x17FFFFFA, 0x52800038,
+    0x14000002, 0xD503205F, 0x790202D7, 0x885FFEA8,
+    0x340000C8, 0x790202DF, 0x794206C8, 0x34FFFF48,
+    0x94015B25, 0x17FFFFF8, 0x88087EB8, 0x340000C8,
+    0x790202DF, 0x794206C8, 0x34FFFE88, 0x94015B1E,
+    0x17FFFFF2,
+)
+NATIVE_WAIT_MUTEX_COHORT_F_OFFSETS = (0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160)
+
 NATIVE_WAIT_MUTEX_LAYOUTS = (
     (NATIVE_WAIT_MUTEX_WORDS,NATIVE_WAIT_MUTEX_FIELDS,(33,40),(28,48,72,92,112,168),28,19,tuple(range(0,180,4)),(180,)),
     (NATIVE_WAIT_MUTEX_COMPACT_WORDS,NATIVE_WAIT_MUTEX_COMPACT_FIELDS,(30,37),(28,48,72,100),28,19,tuple(range(0,156,4)),(156,)),
     (NATIVE_WAIT_MUTEX_SPARSE_WORDS,NATIVE_WAIT_MUTEX_SPARSE_FIELDS,(32,39),(36,56,76,336),36,22,NATIVE_WAIT_MUTEX_SPARSE_OFFSETS,(92,)),
+    (NATIVE_WAIT_MUTEX_COHORT_A_WORDS,NATIVE_WAIT_MUTEX_COHORT_A_FIELDS,(32, 39),(36, 56, 80, 108),36,22,NATIVE_WAIT_MUTEX_COHORT_A_OFFSETS,(164,)),
+    (NATIVE_WAIT_MUTEX_COHORT_B_WORDS,NATIVE_WAIT_MUTEX_SPARSE_FIELDS,(32, 39),(36, 56, 76, 308),36,22,NATIVE_WAIT_MUTEX_COHORT_B_OFFSETS,(92,)),
+    (NATIVE_WAIT_MUTEX_COHORT_C_WORDS,NATIVE_WAIT_MUTEX_COHORT_A_FIELDS,(32, 39),(36, 56, 80, 108),36,22,NATIVE_WAIT_MUTEX_COHORT_C_OFFSETS,(164,)),
+    (NATIVE_WAIT_MUTEX_COHORT_D_WORDS,NATIVE_WAIT_MUTEX_COHORT_D_FIELDS,(24, 31),(32, 56, 76),32,25,NATIVE_WAIT_MUTEX_COHORT_D_OFFSETS,(132,)),
+    (NATIVE_WAIT_MUTEX_COHORT_E_WORDS,NATIVE_WAIT_MUTEX_COHORT_E_FIELDS,(31, 38),(32, 52, 76, 104),32,21,NATIVE_WAIT_MUTEX_COHORT_E_OFFSETS,(160,)),
+    (NATIVE_WAIT_MUTEX_COHORT_F_WORDS,NATIVE_WAIT_MUTEX_COHORT_A_FIELDS,(32, 39),(36, 56, 80, 108),36,22,NATIVE_WAIT_MUTEX_COHORT_F_OFFSETS,(164,)),
 )
 
 
@@ -796,11 +897,11 @@ def native_conditional_refresh(start, by_pc, kinds, api):
     """
     for variant, (words, fields) in enumerate(zip(NATIVE_CONDITIONAL_WORDS,
                                                 NATIVE_CONDITIONAL_FIELDS)):
-        begin = start.address - (0, 0, 20, 0, 20, 16, 4, 4, 4, 4, 20, 20, 0, 72, 28, 32, 32, 0, 0, 0, 8, 0, 0, 12, 0, 8, 8, 8, 8, 8, 0, 28, 8, 8, 8, 8, 8, 8, 8, 12)[variant]
+        begin = start.address - (0, 0, 20, 0, 20, 16, 4, 4, 4, 4, 20, 20, 0, 72, 28, 32, 32, 0, 0, 0, 8, 0, 0, 12, 0, 8, 8, 8, 8, 8, 0, 28, 8, 8, 8, 8, 8, 8, 8, 12, 4, 8)[variant]
         block = tuple(by_pc.get(begin + i*4) for i in range(len(words)))
         if begin < 0 or any(ins is None for ins in block):
             continue
-        external = ((6,), (5,), (2, 4), (4, 9), (3,), (3,), (), (), (), (7,), (4, 9), (4, 9), (15,), (), (), (2, 7, 15), (2, 15), (), (10, 16), (10,), (11, 15), (), (6, 10), (2, 14), (5, 9, 15), (12, 15), (12, 15), (12, 15), (12, 15), (12, 15), (), (5,), (14,), (14,), (14,), (14,), (14,), (14,), (14,), ())[variant]
+        external = ((6,), (5,), (2, 4), (4, 9), (3,), (3,), (), (), (), (7,), (4, 9), (4, 9), (15,), (), (), (2, 7, 15), (2, 15), (), (10, 16), (10,), (11, 15), (), (6, 10), (2, 14), (5, 9, 15), (12, 15), (12, 15), (12, 15), (12, 15), (12, 15), (), (5,), (14,), (14,), (14,), (14,), (14,), (14,), (14,), (), (), (1,))[variant]
         roles, reverse, matched = {}, {}, True
         for index, (ins, expected, shifts) in enumerate(zip(block, words, fields)):
             value = struct.unpack('<I', ins.bytes)[0]
@@ -840,8 +941,8 @@ def native_conditional_refresh(start, by_pc, kinds, api):
             validate_memory_operands(ins,api)
             if ins.mnemonic in api.EXCLUSIVE_LOADS | api.EXCLUSIVE_STORES:
                 validate_exclusive(ins,api)
-        entry = begin + (0, 0, 12, 0, 16, 4, 0, 0, 0, 0, 20, 20, 0, 4, 28, 32, 32, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0)[variant]
-        heads = {begin+offset for offset in ((0, 28), (0, 28), (20,), (0, 20), (20,), (16,), (4,), (4,), (4,), (4,), (20,), (20,), (0,), (72, 144), (28,), (32,), (32,), (0,), (0,), (0,), (8,), (0,), (0,), (12,), (0,), (8,), (8,), (8,), (8,), (8,), (0,), (28,), (8,), (8,), (8,), (8,), (8,), (8,), (8,), (12,))[variant]}
+        entry = begin + (0, 0, 12, 0, 16, 4, 0, 0, 0, 0, 20, 20, 0, 4, 28, 32, 32, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8)[variant]
+        heads = {begin+offset for offset in ((0, 28), (0, 28), (20,), (0, 20), (20,), (16,), (4,), (4,), (4,), (4,), (20,), (20,), (0,), (72, 144), (28,), (32,), (32,), (0,), (0,), (0,), (8,), (0,), (0,), (12,), (0,), (8,), (8,), (8,), (8,), (8,), (0,), (28,), (8,), (8,), (8,), (8,), (8,), (8,), (8,), (12,), (4,), (8,))[variant]}
         return nodes,entry,heads
     return None
 
@@ -1157,6 +1258,60 @@ def require_native_wait_transfers(instructions, by_pc, kinds, entries, protected
 
 def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfers=None):
     by_pc = {ins.address: ins for ins in instructions}
+    direct_incoming, entry_index_attempted = None, False
+
+    def check_direct_entry(nodes, interior):
+        # This index belongs only to this immutable planning invocation. Normal
+        # fallthrough is queried at target - 4, never stored for every source.
+        nonlocal direct_incoming, entry_index_attempted
+        if not entry_index_attempted:
+            entry_index_attempted = True
+            try:
+                incoming, previous = {}, None
+                for ins in instructions:
+                    pc = ins.address
+                    if (type(pc) is not int or (previous is not None and pc <= previous) or
+                            by_pc.get(pc) is not ins):
+                        raise ValueError('entry index requires ordered unique source identities')
+                    previous = pc
+                    targets = successors(ins)
+                    if not isinstance(targets, tuple) or any(type(target) is not int for target in targets):
+                        raise ValueError('unexpected canonical successor shape')
+                    for target in targets:
+                        if target != pc + 4:
+                            incoming.setdefault(target, []).append(pc)
+                direct_incoming = incoming
+            except Exception:
+                direct_incoming = None
+        if direct_incoming is not None:
+            try:
+                first = None
+                for target in interior:
+                    for pc in direct_incoming.get(target, ()):
+                        if pc not in nodes:
+                            first = pc if first is None else min(first, pc)
+                            break
+                    pc = target - 4
+                    ins = by_pc.get(pc)
+                    if ins is not None and pc not in nodes and target in successors(ins):
+                        first = ins.address if first is None else min(first, ins.address)
+            except Exception:
+                direct_incoming = None
+            else:
+                if first is not None:
+                    raise api.RewriteError(f'0x{first:x}: external entry into exclusive region interior')
+                return
+        # Preserve original source ordinal, short-circuiting, and raw failures
+        # for an unexpected shape or any context that cannot support the index.
+        for ins in instructions:
+            if ins.address not in nodes and any(target in interior for target in successors(ins)):
+                raise api.RewriteError(f'0x{ins.address:x}: external entry into exclusive region interior')
+
+    def check_single_entry(nodes, entry):
+        if (set(entry_offsets) & nodes) - {entry}:
+            raise api.RewriteError(f'0x{entry:x}: external entry in exclusive region interior')
+        check_direct_entry(nodes, nodes - {entry})
+
     regions, occupied, consumed = [], set(), set()
     for start in instructions:
         if start.mnemonic not in api.EXCLUSIVE_LOADS or start.address in consumed:
@@ -1169,7 +1324,7 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfe
             producer=entry-4;protected=nodes|{producer}
             if occupied&protected:
                 raise api.RewriteError(f'0x{producer:x}: overlapping exclusive windows')
-            require_single_entry(protected,producer,instructions,entry_offsets,api)
+            check_single_entry(protected,producer)
             require_native_wait_transfers(instructions,by_pc,kinds,entry_offsets,protected,producer,native_wait_transfers,api)
             occupied.update(protected);consumed.update(heads)
             continue
@@ -1179,7 +1334,7 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfe
             producer=entry-4;protected=nodes|{producer}
             if occupied&protected:
                 raise api.RewriteError(f'0x{producer:x}: overlapping exclusive windows')
-            require_single_entry(protected,producer,instructions,entry_offsets,api)
+            check_single_entry(protected,producer)
             require_native_wait_transfers(instructions,by_pc,kinds,entry_offsets,protected,producer,native_wait_transfers,api)
             occupied.update(protected);consumed.update(heads)
             continue
@@ -1188,7 +1343,7 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfe
             nodes=set(range(native_entry,native_entry+56,4))
             if occupied&nodes:
                 raise api.RewriteError(f'0x{native_entry:x}: overlapping exclusive windows')
-            require_single_entry(nodes,native_entry,instructions,entry_offsets,api)
+            check_single_entry(nodes,native_entry)
             occupied.update(nodes)
             continue
         native_start=native_rotated_lock(start,by_pc,kinds,api)
@@ -1196,7 +1351,7 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfe
             nodes=set(range(native_start,native_start+20,4))
             if occupied&nodes:
                 raise api.RewriteError(f'0x{native_start:x}: overlapping exclusive windows')
-            require_single_entry(nodes,start.address,instructions,entry_offsets,api)
+            check_single_entry(nodes,start.address)
             occupied.update(nodes)
             continue
         shared=native_shared_clear(start,by_pc,kinds,api)
@@ -1206,9 +1361,8 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfe
                 raise api.RewriteError(f'0x{start.address:x}: overlapping exclusive windows')
             if (set(entry_offsets)&nodes)-{min(heads)}:
                 raise api.RewriteError(f'0x{start.address:x}: external entry in exclusive region interior')
-            for ins in instructions:
-                if ins.address not in nodes and any(target in nodes-heads for target in successors(ins)):
-                    raise api.RewriteError(f'0x{ins.address:x}: external entry into exclusive region interior')
+            interior = nodes-heads
+            check_direct_entry(nodes, interior)
             occupied.update(nodes);consumed.update(heads)
             continue
         chain=native_pointer_chain(start,by_pc,kinds,api)
@@ -1216,7 +1370,7 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfe
             nodes,entry,heads=chain
             if occupied&nodes:
                 raise api.RewriteError(f'0x{entry:x}: overlapping exclusive windows')
-            require_single_entry(nodes,entry,instructions,entry_offsets,api)
+            check_single_entry(nodes,entry)
             occupied.update(nodes);consumed.update(heads)
             continue
         conditional=native_conditional_refresh(start,by_pc,kinds,api)
@@ -1224,14 +1378,14 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfe
             nodes,entry,heads=conditional
             if occupied&nodes:
                 raise api.RewriteError(f'0x{entry:x}: overlapping exclusive windows')
-            require_single_entry(nodes,entry,instructions,entry_offsets,api)
+            check_single_entry(nodes,entry)
             occupied.update(nodes);consumed.update(heads)
             continue
         if native_dual_load_lock(start, by_pc, kinds, api):
             nodes = set(range(start.address, start.address + 28, 4))
             if occupied & nodes:
                 raise api.RewriteError(f'0x{start.address:x}: overlapping exclusive windows')
-            require_single_entry(nodes, start.address, instructions, entry_offsets, api)
+            check_single_entry(nodes,start.address)
             occupied.update(nodes)
             consumed.add(start.address + 12)
             continue
@@ -1240,7 +1394,7 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfe
             nodes,entry,heads=pointer
             if occupied&nodes:
                 raise api.RewriteError(f'0x{entry:x}: overlapping exclusive windows')
-            require_single_entry(nodes,entry,instructions,entry_offsets,api)
+            check_single_entry(nodes,entry)
             occupied.update(nodes);consumed.update(heads)
             continue
         preload=virtual_preload_cas(start,by_pc,kinds,api)
@@ -1251,7 +1405,7 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfe
             if occupied&nodes:
                 raise api.RewriteError(f'0x{preload.entry:x}: overlapping exclusive windows')
             require_acyclic(nodes,by_pc,preload.retry_edges,preload.exit_edges,api)
-            require_single_entry(nodes,preload.entry,instructions,entry_offsets,api)
+            check_single_entry(nodes,preload.entry)
             occupied.update(nodes);consumed.add(start.address);regions.append(preload)
             continue
         colors, terminals = {}, set()
@@ -1301,7 +1455,7 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfe
         if native_nodes is not None:
             if occupied&native_nodes:
                 raise api.RewriteError(f'0x{start.address:x}: overlapping exclusive windows')
-            require_single_entry(native_nodes,start.address,instructions,entry_offsets,api)
+            check_single_entry(native_nodes,start.address)
             occupied.update(native_nodes)
             continue
         for pc in terminals:
@@ -1328,7 +1482,7 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfe
         exits = {(pc, target) for pc in nodes for target in successors(by_pc[pc])
                  if target not in nodes or by_pc[pc].mnemonic == 'clrex'}
         require_acyclic(nodes, by_pc, retries, exits, api)
-        require_single_entry(nodes, start.address, instructions, entry_offsets, api)
+        check_single_entry(nodes,start.address)
         # Entry/CFG boundaries apply even when the reservation stays in-place.
         # Only actual relocation needs an SP-independent body and spare GPRs.
         if not any(kinds[pc] for pc in nodes):
