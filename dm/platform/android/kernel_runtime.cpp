@@ -10,6 +10,7 @@
 #include "oe_platform.h"
 #include "diagnostic_authority.h"
 #include "original_bringup.h"
+#include "taiko_bringup.h"
 #include "graphics_platform.h"
 #include "vi_platform.h"
 #include "audio_platform.h"
@@ -164,7 +165,8 @@ bool HleRuntime::load(std::vector<std::unique_ptr<ModulePackage>> packages, bool
     process_owned=true;
     load_stage="original graph authority";
     const bool original_bringup=original_bringup_graph(process_,nullptr);
-    if(original_bringup && fallback) {
+    const bool taiko_stock=taiko_bringup_graph(process_,nullptr);
+    if((original_bringup || taiko_stock) && fallback) {
         rollback();return fail(error,"original bringup forbids a fixture import fallback");
     }
     if (all_forces && !registry_.require_all_forces(error)) {rollback();return false;}
@@ -185,9 +187,10 @@ bool HleRuntime::load(std::vector<std::unique_ptr<ModulePackage>> packages, bool
     // Exact public controller fixtures and the separately compiled original
     // stock graph may use actual basic input. Unknown graphs retain refusal;
     // neither route installs or claims a FullProduct gameplay adapter.
-    if(controller_diagnostic_graph(process_,nullptr) || original_bringup) {
+    if(controller_diagnostic_graph(process_,nullptr) || original_bringup || taiko_stock) {
         dm_hid_adapter input{};
-        input.identity=original_bringup?"android-original-bringup-basic-input-v1":"android-public-controller-sdk-v1";
+        input.identity=taiko_stock?"android-taiko-stock-basic-input-v1":
+            original_bringup?"android-original-bringup-basic-input-v1":"android-public-controller-sdk-v1";
         load_stage="basic input publication";
         if(!dm_hid_configure(DM_HID_DIAGNOSTIC_RAW,&input)) {
             rollback();

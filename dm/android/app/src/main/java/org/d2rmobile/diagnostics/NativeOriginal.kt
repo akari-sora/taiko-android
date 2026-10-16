@@ -7,5 +7,12 @@ package org.d2rmobile.diagnostics
 object NativeOriginal {
     init { System.loadLibrary("d2r_diagnostics") }
 
-    @JvmStatic external fun run(activity: MainActivity): String
+    @JvmStatic fun run(activity: MainActivity): String =
+        TaikoContentStore(activity).withNativeContent { runNative(activity) }
+
+    @JvmStatic private external fun runNative(activity: MainActivity): String
+
+    /** Actual native runtime state, including a retained guest after a call returns. */
+    @JvmStatic external fun contentInUse(): Boolean
+    @JvmStatic external fun hasCompiledBuild(): Boolean
 }

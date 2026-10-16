@@ -3,6 +3,7 @@
 #include "module_runtime.h"
 #include "diagnostic_authority.h"
 #include "original_bringup.h"
+#include "taiko_bringup.h"
 #include <string>
 #include <vector>
 
@@ -48,6 +49,7 @@ public:
     // There is deliberately no product-enable flag while real consumers are absent.
     bool authorize(Process& process, std::string* error);
     bool authorize_original_bringup(Process& process, std::string* error);
+    bool authorize_taiko_bringup(Process& process, std::string* error);
     // Matches host/main.c guest_main. It never jumps to NSO offset zero and
     // never runs DT_INIT_ARRAY separately from each module's own DT_INIT.
     // A failed/finished session cannot be retried against initialized state.
@@ -57,6 +59,10 @@ private:
     bool started_ = false;
     DiagnosticAuthority authority_;
     OriginalBringupAuthority original_authority_;
-    enum class Purpose { None, Diagnostic, OriginalBringup } purpose_ = Purpose::None;
+    TaikoBringupAuthority taiko_authority_;
+    // Semantic replacement for pinned rtld callback A's exception-ready store.
+    // It is session/generation bound and never claims guest rtld execution.
+    bool taiko_host_loader_ready_ = false;
+    enum class Purpose { None, Diagnostic, OriginalBringup, TaikoStock } purpose_ = Purpose::None;
 };
 } // namespace dm_android

@@ -68,6 +68,11 @@ bool BootstrapSession::authorize_original_bringup(Process& process,std::string* 
     if(!original_authority_.bind(process,this,error))return false;
     purpose_=Purpose::OriginalBringup;return true;
 }
+bool BootstrapSession::authorize_taiko_bringup(Process& process,std::string* error) {
+    if(purpose_!=Purpose::None)return fail(error,"bootstrap purpose is already authorized");
+    if(!taiko_authority_.bind(process,this,error))return false;
+    purpose_=Purpose::TaikoStock;return true;
+}
 BootstrapArguments::BootstrapArguments(std::vector<std::string> values) : values_(std::move(values)) {
     if (values_.empty() || values_.size() > 63) {
         error_ = "guest requires one through 63 arguments";
@@ -93,7 +98,10 @@ bool BootstrapSession::run(Process& process, GuestEnvironment& environment, Gues
     if (started_) return fail(error, "bootstrap session has already started");
     // Capability validation precedes started_, registration and every SDK or
     // module initializer. A refused attempt cannot consume this session.
-    if(purpose_==Purpose::OriginalBringup) {
+    const bool taiko=purpose_==Purpose::TaikoStock;
+    if(taiko) {
+        if(!taiko_authority_.validate(process,this,error))return false;
+    } else if(purpose_==Purpose::OriginalBringup) {
         if(!original_authority_.validate(process,this,error))return false;
     } else if (!authority_.validate(process, this, error)) return false;
     if (!arguments.valid()) return fail(error, arguments.error());
@@ -107,6 +115,21 @@ bool BootstrapSession::run(Process& process, GuestEnvironment& environment, Gues
     std::array<uintptr_t, names.size()> functions{};
     // Validate every required startup entry before any initialization side effect.
     for (size_t i = 0; i < names.size(); ++i) {
+        if(taiko) {
+            // Host argc/argv setters are not part of this pinned SDK Start.
+            // nnosInitialize receives the real registry's argument-area value.
+            if(i==6 || i==7)continue;
+            const TaikoStartupStep* pinned=nullptr;
+            for(const auto& entry:taiko_startup_plan())
+                if(entry.kind==TaikoStartupKind::Guest && std::string(entry.name)==names[i])pinned=&entry;
+            if(!pinned || pinned->module_index>=process.modules().size() ||
+               !process.module_symbol(pinned->module_index,names[i],&functions[i]) ||
+               functions[i]!=reinterpret_cast<uintptr_t>(process.modules()[pinned->module_index]->mapping.base)+pinned->offset ||
+               !executable(process,functions[i]) || !process.callback_root(functions[i]) ||
+               !process.checked_stack_entry(functions[i]))
+                return fail(error,std::string("Taiko pinned executable bootstrap entry mismatch: ")+names[i]);
+            continue;
+        }
         if (!process.symbol(names[i], &functions[i]) || !executable(process, functions[i]))
             return fail(error, std::string("missing executable bootstrap symbol: ") + names[i]);
     }
@@ -133,21 +156,33 @@ bool BootstrapSession::run(Process& process, GuestEnvironment& environment, Gues
     if (!step(0, nullptr, 0, false)) return false;
     const uint64_t os_args[]{handle, argument_area};
     if (!step(1, os_args, 2, false)) return false;
+    if(taiko) {
+        if(!taiko_authority_.validate(process,this,error))return false;
+        if(!observe(hooks,"taiko_host_loader_ready",false,error))return false;
+        taiko_host_loader_ready_=true;
+        result->completed_steps.emplace_back("taiko_host_loader_ready");
+        if(!observe(hooks,"taiko_host_loader_ready",true,error))return false;
+    }
     for (size_t i = 2; i < 6; ++i) if (!step(i, nullptr, 0, false)) return false;
     InitContext init_context{&state, &stack, &process, &hooks};
     if(!observe(hooks,"module_initializers",false,error))return false;
-    if (!process.run_initializers(run_init, &init_context, error)) return false;
+    if(taiko && !taiko_host_loader_ready_)return fail(error,"Taiko host loader is not ready");
+    if (!process.run_initializers(run_init, &init_context, error,
+            taiko?InitializerOrder::Reverse:InitializerOrder::Forward)) return false;
     result->completed_steps.emplace_back("module_initializers");
     if(!observe(hooks,"module_initializers",true,error))return false;
-    const uint64_t argc = arguments.argc();
-    if (!step(6, &argc, 1, false)) return false;
-    const uint64_t argv = reinterpret_cast<uintptr_t>(arguments.argv());
-    if (!step(7, &argv, 1, false)) return false;
+    if(!taiko) {
+        const uint64_t argc = arguments.argc();
+        if (!step(6, &argc, 1, false)) return false;
+        const uint64_t argv = reinterpret_cast<uintptr_t>(arguments.argv());
+        if (!step(7, &argv, 1, false)) return false;
+    }
     // Product helpers resolve and invoke guest functions directly. They need
     // the same attachment and guest SP as SDK initialization and nnMain.
     ProductContext product{process, state, hooks, error};
     GuestCallResult product_result;
-    const char* attachment_step=purpose_==Purpose::OriginalBringup?"original_platform_attachment":"product_initialization";
+    const char* attachment_step=taiko?"taiko_platform_attachment":
+        purpose_==Purpose::OriginalBringup?"original_platform_attachment":"product_initialization";
     if(!observe(hooks,attachment_step,false,error))return false;
     if (!stack.call(state, reinterpret_cast<uintptr_t>(&run_product),
                     reinterpret_cast<uintptr_t>(&product), &product_result, error)) return false;
@@ -155,6 +190,13 @@ bool BootstrapSession::run(Process& process, GuestEnvironment& environment, Gues
     if (!product.succeeded) return false;
     result->completed_steps.emplace_back(attachment_step);
     if(!observe(hooks,attachment_step,true,error))return false;
-    return step(8, nullptr, 0, true);
+    if(taiko && (!taiko_host_loader_ready_ || !taiko_authority_.validate(process,this,error)))return false;
+    if(!step(8,nullptr,0,true))return false;
+    // The verified Start suffix requires rtld C (forward DT_FINI), SDK finalizer
+    // and quick exit. Until those exist, a normal nnMain return cannot be
+    // misreported as successful complete SDK process teardown.
+    if(taiko && !result->main_result.exited)
+        return fail(error,"Taiko nnMain returned; pinned loader finalization and SDK teardown are unavailable");
+    return true;
 }
 } // namespace dm_android

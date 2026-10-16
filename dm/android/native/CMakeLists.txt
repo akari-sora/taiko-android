@@ -33,6 +33,8 @@ add_library(d2r_diagnostics SHARED diagnostics.cpp
   ../../platform/android/audio_focus.cpp
   ../../platform/android/diagnostic_authority.cpp
   ../../platform/android/original_bringup.cpp
+  ../../platform/android/taiko_bringup.cpp
+  ../../platform/android/taiko_resources.cpp
   ../../platform/android/original_runner.cpp
   ../../platform/android/guest_loader.cpp
   ../../platform/android/guest_entry.S
@@ -100,8 +102,14 @@ if(DM_ORIGINAL_PINS AND NOT DM_TARGET_TAIKO)
 endif()
 if(DM_TARGET_TAIKO)
   target_compile_definitions(d2r_diagnostics PRIVATE DM_TARGET_TAIKO=1)
+  # Private generated pins exist only after a successful strict Taiko import.
+  file(GLOB DM_TAIKO_PINS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../.local/taiko_build_pins.cpp")
+  if(DM_TAIKO_PINS)
+    target_sources(d2r_diagnostics PRIVATE ${DM_TAIKO_PINS})
+  endif()
 endif()
-target_include_directories(d2r_diagnostics PRIVATE ../../gfx/nvn/include)
+target_include_directories(d2r_diagnostics PRIVATE ../../gfx/nvn/include ../../platform/android)
 set_source_files_properties(../../host/dm_custom.c PROPERTIES COMPILE_DEFINITIONS DM_ANDROID_CONFIG_ONLY=1)
 target_compile_features(d2r_diagnostics PRIVATE c_std_11 cxx_std_17)
 target_compile_options(d2r_diagnostics PRIVATE -Wall -Wextra -Werror -ffixed-x18)

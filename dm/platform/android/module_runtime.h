@@ -64,6 +64,7 @@ private:
     friend bool decode_package_with_callback_audit(const uint8_t*, size_t, const uint8_t*,
         const TrustedCallbackAudit&, std::unique_ptr<ModulePackage>*, std::string*, const ModuleLimits&);
     bool callback_admitted_ = false;
+    CallbackIndirectPolicy callback_indirect_policy_ = CallbackIndirectPolicy::Strict;
     std::array<uint8_t,32> callback_identity_{};
     std::vector<uint64_t> callback_roots_;
     bool stack_admitted_ = false;
@@ -97,6 +98,7 @@ using HostResolver = bool (*)(const char* name, bool forced_only,
 // Runner owns attaching thread state / invocation ABI. No NSO entry execution
 // occurs during load; DT_INIT execution requires an explicit caller.
 using InitRunner = bool (*)(uintptr_t address, void* context, std::string* error);
+enum class InitializerOrder { Forward, Reverse };
 struct ModuleDynamic;
 struct HostModuleView {
     const void *dynamic=nullptr, *symbols=nullptr;
@@ -142,7 +144,8 @@ public:
     bool borrowed_module(size_t index, HostModuleView* view) const;
     bool pin_host_binding(std::string* error);
     void unpin_host_binding();
-    bool run_initializers(InitRunner runner, void* context, std::string* error);
+    bool run_initializers(InitRunner runner, void* context, std::string* error,
+                          InitializerOrder order = InitializerOrder::Forward);
     static const DmGuestGate* gate_resolver(void* context, uint64_t return_pc);
     bool guarded_host_site(uint64_t return_pc, const DmGuestGate* gate) const;
     bool stack_check_site(uint64_t return_pc,const DmGuestGate* gate) const;
@@ -168,6 +171,9 @@ public:
     // Returns only verified, frozen provenance while the complete public
     // descriptor still matches its pre-relocation load identity.
     bool loaded_package_authority(size_t index, LoadedPackageAuthority* out) const;
+    // Exact private admitted audit roots/policy against a compiled authority.
+    // Public descriptor or caller-created subset/superset roots cannot match.
+    bool loaded_callback_roots_match(size_t index, const TrustedCallbackAudit&) const;
 private:
     std::vector<std::unique_ptr<LoadedModule>> modules_;
     struct FrozenGate { DmGuestGate gate; GateProvenance provenance; bool canonical_v2; bool checked_stack; };

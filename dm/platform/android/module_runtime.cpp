@@ -98,7 +98,7 @@ ModulePackage::ModulePackage(const ModulePackage& other) { *this=other; }
 ModulePackage& ModulePackage::operator=(const ModulePackage& p) {
     if(this==&p) return *this;
     // Revoke before copying, including if a later allocation throws.
-    callback_admitted_=false;callback_identity_={};callback_roots_.clear();
+    callback_admitted_=false;callback_identity_={};callback_roots_.clear();callback_indirect_policy_=CallbackIndirectPolicy::Strict;
     stack_admitted_=false;stack_identity_={};
     capsule_verified_=false;capsule_bytes_=0;capsule_sha256_={};
     name=p.name;build_id=p.build_id;source_sha256=p.source_sha256;image_sha256=p.image_sha256;
@@ -155,6 +155,7 @@ bool decode_package_with_callback_audit(const uint8_t* blob,size_t size,const ui
         // used before mapping; merely being present in RX grants no authority.
         if(!validate_callback_symbols(*p,audit,error)) return false;
         if(audit.root_count) p->callback_roots_.assign(audit.roots,audit.roots+audit.root_count);
+        p->callback_indirect_policy_=audit.indirect_policy;
         p->callback_identity_=package_identity(*p);p->callback_admitted_=true;
         *out=std::move(p);return true;
     } catch(const std::bad_alloc&) {return fail(error,"callback audit allocation failed");}
@@ -761,6 +762,16 @@ bool Process::loaded_package_authority(size_t index,LoadedPackageAuthority* out)
     out->callback_audited=p.callback_admitted_ && p.callback_identity_==m.load_identity_;
     return true;
 }
+bool Process::loaded_callback_roots_match(size_t index,const TrustedCallbackAudit& audit) const {
+    LoadedPackageAuthority frozen{};
+    if(!loaded_package_authority(index,&frozen) || !frozen.callback_audited ||
+       audit.version!=1 || audit.root_kind!=CallbackRootKind::DefinedSttFunc ||
+       audit.package_sha256!=frozen.capsule_sha256 || !audit.roots || !audit.root_count)return false;
+    const auto& package=*modules_[index]->package;
+    if(audit.source_sha256!=package.source_sha256 || audit.indirect_policy!=package.callback_indirect_policy_ ||
+       audit.root_count!=package.callback_roots_.size())return false;
+    return std::equal(package.callback_roots_.begin(),package.callback_roots_.end(),audit.roots);
+}
 bool Process::observation_present(uint32_t id) const {
     for(const auto& entry:gates_) {
         const auto& gate=entry.second.gate;
@@ -830,13 +841,16 @@ bool Process::pin_host_binding(std::string* error) {
     return true;
 }
 void Process::unpin_host_binding() { host_bound_=false; }
-bool Process::run_initializers(InitRunner runner,void* context,std::string* error) {
+bool Process::run_initializers(InitRunner runner,void* context,std::string* error,InitializerOrder order) {
     if(error) error->clear();
     if(!runner || modules_.empty()) return fail(error,"initializer runner or loaded process missing");
+    if(order!=InitializerOrder::Forward && order!=InitializerOrder::Reverse)
+        return fail(error,"unknown module initializer order");
     if(initializing_ || initializer_failed_)
         return fail(error,"reentrant or previously failed process initialization");
     initializing_=true;
-    for(auto& m:modules_) {
+    for(size_t position=0;position<modules_.size();++position) {
+        auto& m=modules_[order==InitializerOrder::Reverse?modules_.size()-1-position:position];
         if(m->init_started) continue;
         // Mark before invoking: reentrant/retried calls never repeat DT_INIT.
         m->init_started=true;

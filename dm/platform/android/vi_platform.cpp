@@ -3,6 +3,7 @@
 #include "kernel_memory_android.h"
 #include "diagnostic_authority.h"
 #include "original_bringup.h"
+#include "taiko_bringup.h"
 #include "oe_platform.h"
 extern "C" {
 #include "../../host/hle.h"
@@ -120,7 +121,8 @@ Result handle(void** destination,const void* parent,Kind kind) {
 }
 bool vi_platform_bind(const Process& process,std::string* error,uint64_t* owned_generation) {
     if(owned_generation)*owned_generation=0;
-    if(!graphics_diagnostic_graph(process,nullptr)&&!original_bringup_graph(process,nullptr))return true;
+    if(!graphics_diagnostic_graph(process,nullptr)&&!original_bringup_graph(process,nullptr)&&
+       !taiko_bringup_graph(process,nullptr))return true;
     std::lock_guard<std::mutex> lock(metadata_mutex);
     if(bound_process||!process.load_generation()||binding_serial==UINT64_MAX) {
         if(error)*error="VI platform binding is occupied or its identity is exhausted";

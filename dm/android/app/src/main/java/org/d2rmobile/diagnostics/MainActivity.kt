@@ -2,6 +2,7 @@ package org.d2rmobile.diagnostics
 
 import android.os.Build
 import android.os.Bundle
+import android.content.Intent
 import android.util.AtomicFile
 import android.widget.Button
 import android.widget.LinearLayout
@@ -17,7 +18,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
-/** Shared platform diagnostics. Taiko content import and original launch are unavailable. */
+/** Taiko content preparation and shared platform diagnostics. Original launch remains gated. */
 class MainActivity : GameActivity() {
     private lateinit var status: TextView
     private lateinit var output: TextView
@@ -29,6 +30,7 @@ class MainActivity : GameActivity() {
     private lateinit var originalLaunch: Button
     private lateinit var diagnosticsScroll: ScrollView
     private lateinit var touchControls: TouchControlOverlay
+    private lateinit var taikoSetup: TaikoSetupUi
     private var windowFocusCallbacks = 0L
     private var lastWindowFocus = false
     private var decorFocusCallbacks = 0L
@@ -111,10 +113,8 @@ class MainActivity : GameActivity() {
             text = getString(R.string.app_name)
             textSize = 24f
         })
-        content.addView(TextView(this).apply {
-            text = getString(R.string.taiko_import_unavailable)
-            textSize = 16f
-        })
+        taikoSetup = TaikoSetupUi(this)
+        content.addView(taikoSetup.view)
         content.addView(TextView(this).apply {
             text = "Runtime diagnostics"
             textSize = 21f
@@ -133,6 +133,7 @@ class MainActivity : GameActivity() {
             tag = "original-entry-run"
             text = getString(R.string.original_entry_launch)
             isEnabled = false
+            setOnClickListener { OriginalLaunchCoordinator.request(this@MainActivity) }
         }
         content.addView(originalLaunch)
         content.addView(originalStatus)
@@ -167,12 +168,24 @@ class MainActivity : GameActivity() {
             insets
         }
         content.requestApplyInsets()
-        startDiagnostics()
+        if (!OriginalLaunchCoordinator.attach(this)) startDiagnostics()
     }
 
     override fun onStart() {
         super.onStart()
+        if (::taikoSetup.isInitialized) taikoSetup.onStart()
         DiagnosticCoordinator.readinessChanged()
+    }
+
+    override fun onStop() {
+        if (::taikoSetup.isInitialized) taikoSetup.onStop()
+        super.onStop()
+    }
+
+    @Deprecated("Uses the platform document-tree picker callback")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (::taikoSetup.isInitialized) taikoSetup.onActivityResult(requestCode, resultCode, data)
     }
 
     override fun onResume() {
@@ -211,16 +224,26 @@ class MainActivity : GameActivity() {
     }
 
     private fun startDiagnostics() {
+        if (OriginalLaunchCoordinator.blocksDiagnostics()) return
         DiagnosticCoordinator.request(this)
     }
 
-    /** Legacy coordinator callbacks cannot expose an unavailable Taiko launch. */
-    @Suppress("UNUSED_PARAMETER")
+    /** Native compiled pins gate the offer; native verification still precedes execution. */
     internal fun renderOriginalLaunch(running: Boolean, report: JSONObject?, failure: String?, retryAllowed: Boolean) {
-        diagnosticsScroll.visibility = View.VISIBLE
+        diagnosticsScroll.visibility = if (running) View.INVISIBLE else View.VISIBLE
         touchControls.visibility = View.GONE
-        originalLaunch.isEnabled = false
-        originalStatus.text = getString(R.string.original_entry_intro)
+        val compiled = NativeOriginal.hasCompiledBuild()
+        originalLaunch.isEnabled = compiled && !running && retryAllowed
+        originalLaunch.text = getString(if (compiled) R.string.original_entry_start else R.string.original_entry_launch)
+        originalStatus.text = when {
+            running -> getString(R.string.original_entry_preparing)
+            failure != null -> getString(R.string.original_entry_failed, failure)
+            report != null -> getString(R.string.original_entry_result, report.optString("status"),
+                report.optString("error"), report.optString("lastStep"))
+            compiled -> getString(R.string.original_entry_ready)
+            else -> getString(R.string.original_entry_intro)
+        }
+        if (running) window.decorView.requestFocus()
     }
 
     internal fun diagnosticsDeferred(message: String) {
@@ -321,6 +344,8 @@ class MainActivity : GameActivity() {
     }
 
     override fun onDestroy() {
+        OriginalLaunchCoordinator.detach(this)
+        if (::taikoSetup.isInitialized) taikoSetup.destroy()
         activityResumed = false
         Choreographer.getInstance().removeFrameCallback(displayFrameCallback)
         if (::audio.isInitialized) audio.destroy()

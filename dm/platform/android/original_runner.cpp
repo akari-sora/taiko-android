@@ -1,5 +1,7 @@
 #include "original_runner.h"
 #include "original_bringup.h"
+#include "taiko_bringup.h"
+#include "taiko_resources.h"
 #include "guest_bootstrap.h"
 #include "kernel_runtime.h"
 #include "graphics_platform.h"
@@ -28,6 +30,21 @@ namespace {
 // The existing iOS host gives its main guest 8 MiB (host/main.c). Keep that
 // capacity, with GuestStack's guard pages and all checked-stack entry checks.
 constexpr size_t main_stack_bytes=8u*1024u*1024u;
+#if defined(DM_TARGET_TAIKO) && DM_TARGET_TAIKO
+using EntryModulePin=TaikoModulePin;
+constexpr bool taiko_target=true;
+constexpr const char* game_directory="taiko";
+constexpr const char* argument_title="Taiko";
+const TaikoBuildPins* entry_build(){return taiko_bringup_build();}
+bool entry_graph(const Process& process,std::string* error){return taiko_bringup_graph(process,error);}
+#else
+using EntryModulePin=OriginalModulePin;
+constexpr bool taiko_target=false;
+constexpr const char* game_directory="game";
+constexpr const char* argument_title="D2R";
+const OriginalBuildPins* entry_build(){return original_bringup_build();}
+bool entry_graph(const Process& process,std::string* error){return original_bringup_graph(process,error);}
+#endif
 constexpr const char* capsule_directory="original-first-entry-v1";
 bool fail(std::string* error,const std::string& text){if(error)*error=text;return false;}
 std::string quote(const std::string& text){
@@ -87,7 +104,7 @@ public:
     std::string name;
 private:std::unique_ptr<Fd> fd_;
 };
-bool read_capsule(int parent,const OriginalModulePin& pin,std::unique_ptr<ModulePackage>* output,std::string* error){
+bool read_capsule(int parent,const EntryModulePin& pin,std::unique_ptr<ModulePackage>* output,std::string* error){
     if(!pin.name || (std::strcmp(pin.name,"main")&&std::strcmp(pin.name,"sdk")&&std::strcmp(pin.name,"subsdk0")))
         return fail(error,"original module name is not in the fixed allowlist");
     const std::string name=std::string(pin.name)+".dmag";
@@ -117,7 +134,7 @@ struct Attempt {
     HleRuntime runtime;
     GuestEnvironment guest;
     GuestStack stack{main_stack_bytes};
-    BootstrapArguments arguments{{"D2R"}};
+    BootstrapArguments arguments{{argument_title}};
     BootstrapSession bootstrap;
     BootstrapResult result;
     Journal journal;
@@ -132,7 +149,7 @@ struct Attempt {
         auto& self=*static_cast<Attempt*>(opaque);
         const auto surface=graphics_surface_snapshot();const auto oe=oe_platform_receipt();
         RuntimeGpuLease graphics;
-        if(!original_bringup_graph(process,error))return false;
+        if(!entry_graph(process,error))return false;
         if(!self.resources_ready || state.runtime_generation!=process.load_generation() ||
            graphics.runtime()!=&self.runtime || graphics.generation()!=process.load_generation() ||
            dm_hid_configured_mode()!=DM_HID_DIAGNOSTIC_RAW || dm_hid_product_complete() ||
@@ -175,28 +192,41 @@ std::string run_original_entry(const std::string& files,const std::string& local
             throw std::runtime_error("original entry requires an actual Android private directory, locale and Activity owner");
         Fd root(open(files.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW));
         if(root.value<0)throw std::runtime_error("cannot open Android files directory");
-        auto game=directory(root.value,"game",true,&error);if(game.value<0)throw std::runtime_error(error);
+        auto game=directory(root.value,game_directory,true,&error);if(game.value<0)throw std::runtime_error(error);
         auto journals=directory(game.value,"original-attempts",true,&error);if(journals.value<0)throw std::runtime_error(error);
         attempt=std::make_unique<Attempt>();state=attempt.get();attempt->owner=owner;
         if(!attempt->journal.open(journals.value,&error))throw std::runtime_error(error);
-        journal_path="game/original-attempts/"+attempt->journal.name;
-        const auto* build=original_bringup_build();
+        journal_path=std::string(game_directory)+"/original-attempts/"+attempt->journal.name;
+        const auto* build=entry_build();
         attempt->journal.write("{\"event\":\"preparation\",\"originalFirstFrame\":\"NOT_OBSERVED\",\"gamePlayable\":false}");
         if(!build)throw std::runtime_error("no complete trusted compiled original capsules; original entry was not called");
-        auto modules=directory(game.value,"modules",false,&error);if(modules.value<0)throw std::runtime_error(error);
-        auto capsules=directory(modules.value,capsule_directory,false,&error);if(capsules.value<0)throw std::runtime_error(error);
-        auto romfs=directory(game.value,"romfs",false,&error);if(romfs.value<0)throw std::runtime_error(error);
+        auto content=taiko_target?directory(game.value,"content",false,&error):directory(game.value,"modules",false,&error);
+        if(content.value<0)throw std::runtime_error(error);
+        auto capsules=directory(content.value,taiko_target?"modules":capsule_directory,false,&error);if(capsules.value<0)throw std::runtime_error(error);
+        auto romfs=directory(taiko_target?content.value:game.value,taiko_target?"RomFS":"romfs",false,&error);if(romfs.value<0)throw std::runtime_error(error);
+#if defined(DM_TARGET_TAIKO) && DM_TARGET_TAIKO
+        if(!verify_taiko_content(content.value,&error))throw std::runtime_error(error);
+#else
         auto data=directory(romfs.value,"data",false,&error);if(data.value<0)throw std::runtime_error(error);
+#endif
         auto save=directory(game.value,"save",true,&error);if(save.value<0)throw std::runtime_error(error);
         auto temp=directory(game.value,"temp",true,&error);if(temp.value<0)throw std::runtime_error(error);
-        const std::string game_path=files+"/game",romfs_path=game_path+"/romfs",save_path=game_path+"/save",temp_path=game_path+"/temp";
+        const std::string game_path=files+"/"+game_directory,romfs_path=game_path+(taiko_target?"/content/RomFS":"/romfs"),save_path=game_path+"/save",temp_path=game_path+"/temp";
+#if !defined(DM_TARGET_TAIKO) || !DM_TARGET_TAIKO
         char resource_error[2048]{};
         if(!dm_romfs_validate((romfs_path+"/data").c_str(),resource_error,sizeof(resource_error)))
             throw std::runtime_error(std::string("required original RomFS bytes unavailable: ")+resource_error);
+#endif
         attempt->resources_ready=true;
         attempt->environment.set("DM_ROMFS",&romfs_path);attempt->environment.set("DM_ROMFS_OVERLAY",nullptr);
         attempt->environment.set("DM_SAVE",&save_path);attempt->environment.set("DM_TEMP",&temp_path);
         attempt->environment.set("DM_LANG",&locale);
+#if defined(DM_TARGET_TAIKO) && DM_TARGET_TAIKO
+        // The admitted input contains Application/Patch only. Do not inherit
+        // the D2R host's default claim that its specific add-on is owned.
+        const std::string no_addons="0";
+        attempt->environment.set("DM_AOC_OWNED",&no_addons);
+#endif
         if(!attempt->stack.valid())throw std::runtime_error(attempt->stack.error());
         std::vector<std::unique_ptr<ModulePackage>> packages;
         for(size_t i=0;i<build->module_count;++i){
@@ -227,7 +257,9 @@ std::string run_original_entry(const std::string& files,const std::string& local
                    <<",\"originalBytes\":"<<module->package->original_size<<'}';
             state->journal.write(mapping.str());
         }
-        if(!state->bootstrap.authorize_original_bringup(state->runtime.process(),&error))throw std::runtime_error(error);
+        const bool authorized=taiko_target?state->bootstrap.authorize_taiko_bringup(state->runtime.process(),&error):
+            state->bootstrap.authorize_original_bringup(state->runtime.process(),&error);
+        if(!authorized)throw std::runtime_error(error);
         // Check foreground facts before any SDK initialization or main-thread
         // registration, then check again at the real before_main attachment.
         // A backgrounded import can therefore retire cleanly and be retried.

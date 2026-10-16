@@ -1,6 +1,7 @@
 #include "graphics_platform.h"
 #include "diagnostic_authority.h"
 #include "original_bringup.h"
+#include "taiko_bringup.h"
 #include "kernel_memory_android.h"
 #include "shader_compute_catalog.h"
 #include "shader_draw_catalog.h"
@@ -872,16 +873,20 @@ bool graphics_platform_bind(const Process& process,std::string* detail) {
     // graphics binding. Full product capability remains a separate future gate.
     const bool fixture=graphics_diagnostic_graph(process,nullptr);
     const bool original=!fixture && original_bringup_graph(process,nullptr);
-    if(!fixture && !original)return true;
+    const bool taiko_stock=!fixture && taiko_bringup_graph(process,nullptr);
+    if(!fixture && !original && !taiko_stock)return true;
     auto candidate=std::make_shared<Platform>();candidate->generation=process.load_generation();
     std::string catalog_error;
-    if(!create_compute_source_catalog(process,&candidate->source_catalog,&catalog_error) && original){
+    if(!taiko_stock && !create_compute_source_catalog(process,&candidate->source_catalog,&catalog_error) && original){
         if(detail)*detail=catalog_error.empty()?"original compute source catalog unavailable":catalog_error;
         return false;
     }
     // Draw source admission independently verifies its complete current graph
     // and shader provenance; compute admission grants no draw authority.
-    if(!create_draw_source_catalog(process,&candidate->draw_catalog,&catalog_error)&&original){if(detail)*detail=catalog_error.empty()?"original draw source catalog unavailable":catalog_error;return false;}
+    if(!taiko_stock && !create_draw_source_catalog(process,&candidate->draw_catalog,&catalog_error)&&original){if(detail)*detail=catalog_error.empty()?"original draw source catalog unavailable":catalog_error;return false;}
+    // Taiko may initialize the real NVN/VI device before requesting a program.
+    // Its empty catalogs grant no shader authority: program capture still calls
+    // the Taiko resolver, which refuses every unimplemented original shader.
     auto& ops=candidate->ops;ops.abi_version=NVN_BACKEND_ABI_VERSION;ops.capabilities=NVN_CAP_OFFSCREEN;
     ops.device_initialize=initialize;ops.device_finalize=[](void* ctx,const dev_t_*){return drain(ctx);};ops.pool_add=pool_add;ops.pool_del=pool_del;ops.tex_register=tex_register;ops.tex_release=tex_release;ops.prog_release=prog_release;ops.tex_pool_init=tex_pool_init;ops.tex_pool_release=tex_pool_release;ops.samp_pool_init=samp_pool_init;ops.samp_pool_release=samp_pool_release;ops.sampler_init=sampler_init;ops.sampler_release=sampler_release;ops.reg_tex=reg_tex;ops.reg_samp=reg_samp;ops.read_texels=read_texels;ops.submit=submit;ops.last_fence=last_fence;ops.wait=wait;ops.finish=drain;ops.drain=drain;ops.queue_error=queue_error;ops.command_callback=callback;ops.frame_count=frame_count;ops.window_init=window_init;ops.window_acquire=window_acquire;ops.window_present=window_present;
     ops.prog_replace=prog_replace;ops.prog_acquire=prog_acquire;ops.prog_unacquire=prog_unacquire;

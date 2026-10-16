@@ -1,5 +1,10 @@
 #include "module_sha256.h"
 #include <string.h>
+#include <algorithm>
+#include <cerrno>
+#include <limits>
+#include <sys/stat.h>
+#include <unistd.h>
 namespace dm_android {
 namespace {
 constexpr uint32_t k[64] = {
@@ -28,16 +33,51 @@ void block(uint32_t h[8], const uint8_t p[64]) {
     h[0]+=a;h[1]+=b;h[2]+=c;h[3]+=d;h[4]+=e;h[5]+=f;h[6]+=g;h[7]+=j;
 }
 }
-void module_sha256(const uint8_t* bytes, size_t size, uint8_t digest[32]) {
-    uint32_t h[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
-    size_t full=size/64;
-    for (size_t i=0;i<full;++i) block(h,bytes+i*64);
-    uint8_t tail[128]={}; const size_t remain=size%64;
-    if(remain) memcpy(tail,bytes+full*64,remain);
+ModuleSha256::ModuleSha256() : state_{0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19} {}
+void ModuleSha256::update(const uint8_t* bytes,size_t size) {
+    if(!size)return;
+    bytes_+=size;
+    if(tail_bytes_) {
+        const size_t take=std::min(size,64-tail_bytes_);
+        if(take)memcpy(tail_+tail_bytes_,bytes,take);
+        tail_bytes_+=take;bytes+=take;size-=take;
+        if(tail_bytes_==64){block(state_,tail_);tail_bytes_=0;}
+    }
+    while(size>=64){block(state_,bytes);bytes+=64;size-=64;}
+    if(size){memcpy(tail_,bytes,size);tail_bytes_=size;}
+}
+void ModuleSha256::finish(uint8_t digest[32]) const {
+    uint32_t h[8];memcpy(h,state_,sizeof(h));
+    uint8_t tail[128]={};const size_t remain=tail_bytes_;
+    if(remain) memcpy(tail,tail_,remain);
     tail[remain]=0x80;
-    size_t length=remain<56?64:128; uint64_t bits=uint64_t(size)*8;
+    size_t length=remain<56?64:128; uint64_t bits=bytes_*8;
     for(unsigned i=0;i<8;++i) tail[length-1-i]=uint8_t(bits>>(i*8));
     block(h,tail);if(length==128) block(h,tail+64);
     for(unsigned i=0;i<32;++i) digest[i]=uint8_t(h[i/4]>>(24-(i%4)*8));
+}
+void module_sha256(const uint8_t* bytes,size_t size,uint8_t digest[32]) {
+    ModuleSha256 hash;hash.update(bytes,size);hash.finish(digest);
+}
+bool module_sha256_fd(int fd,uint64_t expected,uint64_t limit,uint8_t digest[32],std::string* error) {
+    if(error)error->clear();
+    const auto fail=[&](const char* text){if(error)*error=text;return false;};
+    if(!digest || expected>limit || expected>uint64_t(std::numeric_limits<off_t>::max()))return fail("file hash exceeds trusted size bound");
+    struct stat before{},after{};
+    if(fstat(fd,&before) || !S_ISREG(before.st_mode) || before.st_size<0 || uint64_t(before.st_size)!=expected)
+        return fail("file hash requires an ordinary file of the pinned size");
+    ModuleSha256 hash;uint8_t buffer[64*1024];uint64_t position=0;
+    while(position<expected) {
+        const size_t count=static_cast<size_t>(std::min<uint64_t>(sizeof(buffer),expected-position));
+        const ssize_t got=pread(fd,buffer,count,static_cast<off_t>(position));
+        if(got<0 && errno==EINTR)continue;
+        if(got<=0)return fail("file hash read failed or source became short");
+        hash.update(buffer,static_cast<size_t>(got));position+=static_cast<size_t>(got);
+    }
+    if(fstat(fd,&after) || before.st_dev!=after.st_dev || before.st_ino!=after.st_ino ||
+       before.st_size!=after.st_size || before.st_mtim.tv_sec!=after.st_mtim.tv_sec ||
+       before.st_mtim.tv_nsec!=after.st_mtim.tv_nsec || before.st_ctim.tv_sec!=after.st_ctim.tv_sec ||
+       before.st_ctim.tv_nsec!=after.st_ctim.tv_nsec)return fail("file changed during streaming hash");
+    hash.finish(digest);return true;
 }
 }

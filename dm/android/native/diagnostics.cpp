@@ -26,9 +26,9 @@
 #include "../../platform/android/controller_platform.h"
 #include "../../platform/android/graphics_probes.h"
 #include "../../platform/android/graphics_surface.h"
-#if !defined(DM_TARGET_TAIKO) || !DM_TARGET_TAIKO
 #include "../../platform/android/original_runner.h"
-#endif
+#include "../../platform/android/taiko_bringup.h"
+#include "../../platform/android/taiko_resources.h"
 #include "../../platform/android/diagnostic_session.h"
 #include "../../platform/android/oe_platform.h"
 extern "C" {
@@ -680,11 +680,7 @@ Java_org_d2rmobile_diagnostics_NativeGraphics_runComputeDiagnostics(JNIEnv* env,
     return env->NewStringUTF(result.c_str());
 }
 extern "C" JNIEXPORT jstring JNICALL
-Java_org_d2rmobile_diagnostics_NativeOriginal_run(JNIEnv* env,jclass,jobject activity) {
-#if defined(DM_TARGET_TAIKO) && DM_TARGET_TAIKO
-    (void)activity;
-    return env->NewStringUTF("{\"schemaVersion\":1,\"suite\":\"taiko-original-entry\",\"status\":\"UNAVAILABLE\",\"gamePlayable\":false,\"originalGame\":\"NOT_RUN\",\"error\":\"Taiko original startup has no admitted build or shader catalog\"}");
-#else
+Java_org_d2rmobile_diagnostics_NativeOriginal_runNative(JNIEnv* env,jclass,jobject activity) {
     auto call=enter_group(env,DiagnosticGroup::OriginalEntry,0);if(!call)return nullptr;
     // All ART access happens on the ordinary host stack before the first guest
     // call. The native runner receives owned values and never captures JNIEnv.
@@ -727,7 +723,14 @@ Java_org_d2rmobile_diagnostics_NativeOriginal_run(JNIEnv* env,jclass,jobject act
         }
         return nullptr;
     }
-#endif
+}
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_d2rmobile_diagnostics_NativeOriginal_contentInUse(JNIEnv*,jclass) {
+    return dm_android_runtime_is_active()?JNI_TRUE:JNI_FALSE;
+}
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_d2rmobile_diagnostics_NativeOriginal_hasCompiledBuild(JNIEnv*,jclass) {
+    return dm_android::taiko_bringup_build() && dm_android::taiko_content_pins()?JNI_TRUE:JNI_FALSE;
 }
 extern "C" JNIEXPORT jstring JNICALL
 Java_org_d2rmobile_diagnostics_NativeGraphics_surfaceSnapshot(JNIEnv* env,jclass,jobject activity) {
