@@ -277,6 +277,98 @@ def native_compare_retry(start, by_pc, kinds, api):
     return entry
 
 
+NATIVE_CONDITIONAL_WORDS = (
+    (0x885FFD0A, 0x6B09015F, 0x54000100, 0x7100055F,
+     0xD5033F5F, 0x2A0A03E9, 0x540006EB, 0x885FFD0A,
+     0x6B09015F, 0x54FFFF41, 0x11000529, 0x880B7D09,
+     0x7100017F, 0x7A411948, 0x2A0A03E9, 0x54FFFF0A),
+    (0x885FFD49, 0x6B0B013F, 0x54000100, 0xD5033F5F,
+     0x7100053F, 0x5400044B, 0x2A0903EB, 0x885FFD49,
+     0x6B0B013F, 0x54FFFF41, 0x880B7D5F, 0x35FFFF2B),
+    (0xD5033F5F, 0x2A0B03EA, 0x3400014A, 0x7100095F,
+     0x540000E0, 0x885FFD2B, 0x6B0A017F, 0x54FFFF21,
+     0x880C7D28, 0x2A0B03EA, 0x35FFFF0C),
+    (0xC85F7D09, 0xB40000C9, 0xD5033F5F, 0xF94007E0,
+     0xB50000C9, 0xC85F7D09, 0xB5FFFF89, 0xC80AFD00,
+     0x35FFFF6A, 0x14000002),
+    (0xD5033F5F, 0xAA0A03E9, 0xB940026A, 0x3400020A,
+     0xF9000309, 0xC85F7D0A, 0xEB09015F, 0x54FFFF21,
+     0xC80BFD18, 0xAA0A03E9, 0x35FFFF0B),
+    (0xD5033F5F, 0x88DFFF28, 0x7100051F, 0x54001388,
+     0x885FFF29, 0x6B08013F, 0x54FFFF41, 0x91000508,
+     0x8809FF28, 0x35FFFF09),
+)
+NATIVE_CONDITIONAL_FIELDS = (
+    ((0,5),(5,16),(),(5,),(),(0,16),(),(0,5),(5,16),(),
+     (0,5),(0,5,16),(5,),(5,),(0,16),()),
+    ((0,5),(5,16),(),(),(5,),(),(0,16),(0,5),(5,16),(),
+     (0,5,16),(0,)),
+    ((),(0,16),(0,),(5,),(),(0,5),(5,16),(),(0,5,16),
+     (0,16),(0,)),
+    ((0,5),(0,),(),(0,),(0,),(0,5),(0,),(0,5,16),(0,),()),
+    ((),(0,16),(0,5),(0,),(0,5),(0,5),(5,16),(),(0,5,16),(0,16),(0,)),
+    ((),(0,5),(5,),(),(0,5),(5,16),(),(0,5),(0,5,16),(0,)),
+)
+
+
+def native_conditional_refresh(start, by_pc, kinds, api):
+    """Return (all nodes, ordinary entry, reservation heads), or None.
+
+    These observed schedules share a native refresh body across reservations.
+    Registers are consistently renamed injectively, including intentionally
+    reused expected/status roles; WZR and every ordering/condition bit stay fixed.
+    No instruction is emitted, patched, or allowed across a host call.
+    """
+    for variant, (words, fields) in enumerate(zip(NATIVE_CONDITIONAL_WORDS,
+                                                NATIVE_CONDITIONAL_FIELDS)):
+        begin = start.address - (0,0,20,0,20,16)[variant]
+        block = tuple(by_pc.get(begin + i*4) for i in range(len(words)))
+        if begin < 0 or any(ins is None for ins in block):
+            continue
+        external = ((6,),(5,),(2,4),(4,9),(3,),(3,))[variant]
+        roles, reverse, matched = {}, {}, True
+        for index, (ins, expected, shifts) in enumerate(zip(block, words, fields)):
+            value = struct.unpack('<I', ins.bytes)[0]
+            mask = sum(31 << shift for shift in shifts)
+            if index in external:
+                mask |= 0x3FFFFFF if variant == 3 and index == 9 else 0x7FFFF << 5
+            if value & ~mask != expected & ~mask:
+                matched = False
+                break
+            for shift in shifts:
+                role, actual = expected >> shift & 31, value >> shift & 31
+                if role == 31:
+                    matched = actual == 31
+                elif (actual in {18,29,30,31} or roles.get(role,actual) != actual or
+                      reverse.get(actual,role) != role):
+                    matched = False
+                else:
+                    roles[role], reverse[actual] = actual, role
+                if not matched:
+                    break
+            if not matched:
+                break
+        if not matched:
+            continue
+        nodes = {ins.address for ins in block}
+        exits = [block[index].operands[-1].imm for index in external]
+        exits.append(begin + len(words)*4)
+        if any(pc in nodes or pc not in by_pc or api.is_fatal_instruction(by_pc[pc])
+               for pc in exits):
+            continue
+        if any(kinds.get(pc,'missing') is not None for pc in nodes):
+            raise api.RewriteError(f'0x{begin:x}: source rewrite in native conditional refresh')
+        for ins in block:
+            validate_memory_operands(ins,api)
+            if ins.mnemonic in api.EXCLUSIVE_LOADS | api.EXCLUSIVE_STORES:
+                validate_exclusive(ins,api)
+        entry = begin + (0,0,12,0,16,4)[variant]
+        heads = {begin+offset for offset in ((0,28),(0,28),(20,),(0,20),(20,),(16,))[variant]}
+        return nodes,entry,heads
+    return None
+
+
+
 def plan_regions(instructions, kinds, entry_offsets, api):
     by_pc = {ins.address: ins for ins in instructions}
     regions, occupied, consumed = [], set(), set()
@@ -290,6 +382,14 @@ def plan_regions(instructions, kinds, entry_offsets, api):
                 raise api.RewriteError(f'0x{native_entry:x}: overlapping exclusive windows')
             require_single_entry(nodes,native_entry,instructions,entry_offsets,api)
             occupied.update(nodes)
+            continue
+        conditional=native_conditional_refresh(start,by_pc,kinds,api)
+        if conditional is not None:
+            nodes,entry,heads=conditional
+            if occupied&nodes:
+                raise api.RewriteError(f'0x{entry:x}: overlapping exclusive windows')
+            require_single_entry(nodes,entry,instructions,entry_offsets,api)
+            occupied.update(nodes);consumed.update(heads)
             continue
         if native_dual_load_lock(start, by_pc, kinds, api):
             nodes = set(range(start.address, start.address + 28, 4))

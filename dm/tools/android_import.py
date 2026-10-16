@@ -662,7 +662,8 @@ again by the independent rewrite stage.
             if checked_stack:
                 plan=readonly_guest_table(ins,instructions,direct_targets,nso.image,
                                                ((nso.sections[1].offset,nso.sections[1].end),),known_tables=(byte_jumps,guest_tables),
-                                               root_entries=independent_roots)
+                                               root_entries=independent_roots,text_size=nso.sections[0].end,
+                                               protected_ranges=((0,header_end),*metadata.protected,*literal_ranges))
                 if plan is not None:
                     guest_tables[ins.address]=plan
                     for target_pc in (plan['base']+value*4 for value in plan['target_values']):
@@ -809,12 +810,13 @@ again by the independent rewrite stage.
         report['stack_pointer_policy'] = 'v2 immutable STACK_CHECK preflight for every admitted SP writer; active invocation bounds, alignment and headroom; SP stores conservatively taint relocation slots'
     if byte_jumps:
         report['byte_jump_tables'] = [byte_jumps[pc] for pc in sorted(byte_jumps) if 'target_values' not in byte_jumps[pc]]
-        halfwords=[byte_jumps[pc] for pc in sorted(byte_jumps) if 'target_values' in byte_jumps[pc] and not byte_jumps[pc].get('signed_relative')]
+        halfwords=[byte_jumps[pc] for pc in sorted(byte_jumps) if 'target_values' in byte_jumps[pc] and not (byte_jumps[pc].get('signed_relative') or byte_jumps[pc].get('native_signed_relative'))]
         if halfwords:
             report['halfword_jump_tables']=halfwords
-        signed=[byte_jumps[pc] for pc in sorted(byte_jumps) if byte_jumps[pc].get('signed_relative')]
-        if signed:
-            report['signed_relative_jump_tables']=signed
+    signed={pc:plan for pc,plan in byte_jumps.items() if plan.get('signed_relative')}
+    signed.update((pc,plan) for pc,plan in guest_tables.items() if plan.get('native_signed_relative'))
+    if signed:
+        report['signed_relative_jump_tables']=[signed[pc] for pc in sorted(signed)]
     if guest_tables:
         report['readonly_guest_jump_tables']=[guest_tables[pc] for pc in sorted(guest_tables)]
         report['proven_guest_indirect_sites']=sorted(guest_tables)
@@ -931,6 +933,8 @@ def import_module(source, name, *, package_version=1, profile=None, indirect_pol
                     indirect_policy=indirect_policy, package_version=package_version,
                     guarded_indirect_offsets=code_report.get('guarded_indirect_sites', ()), checked_stack=checked_stack,
                     readonly_ranges=((nso.sections[1].offset,nso.sections[1].end),),
+                    protected_ranges=((0,48 if struct.unpack_from('<I',nso.image)[0] == 0 else 0),
+                                      *metadata.protected,*code_report['proven_literal_ranges']),
                     proven_guest_indirect_offsets=code_report.get('proven_guest_indirect_sites',()),
                     checked_call_targets={item['offset']: item['target']
                                           for item in code_report.get('versioned_checked_calls', ())},
