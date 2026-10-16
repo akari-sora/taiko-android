@@ -38,14 +38,14 @@ def assemble(tools):
         return binary.read_bytes(), functions
 
 
-def make_kernel_nso(text, functions):
+def make_kernel_nso(text, functions, imports=IMPORTS):
     # Reuse the independently exercised NSO segment/header/hash writer. Replace
     # its ELF metadata with this fixture's actual imports; no fixture resolver.
     template = bytearray(make_nso('main', text, functions))
     ro, data = bytearray(4096), bytearray(4096)
     definitions = dict(functions, kernel_results=(0x8100, 0x130, 1))
     records, strings, indices = [bytes(24)], bytearray(b'\0'), {}
-    for name in sorted(set(definitions) | set(IMPORTS)):
+    for name in sorted(set(definitions) | set(imports)):
         indices[name] = len(records)
         offset = len(strings)
         strings += name.encode() + b'\0'
@@ -65,7 +65,7 @@ def make_kernel_nso(text, functions):
     ro[hash_offset - 0x4000:hash_offset - 0x4000 + len(table)] = table
     rela_offset = (hash_offset + len(table) + 7) & -8
     relas = b''.join(struct.pack('<QQq', 0x8000 + i * 8, (indices[name] << 32) | 1026, 0)
-                     for i, name in enumerate(IMPORTS))
+                     for i, name in enumerate(imports))
     ro[rela_offset - 0x4000:rela_offset - 0x4000 + len(relas)] = relas
     dynamic = [(5, string_offset), (10, len(strings)), (6, 0x4000), (11, 24), (4, hash_offset),
                (12, functions['fixture_init'][0]), (23, rela_offset), (2, len(relas)), (20, 7), (0, 0)]
@@ -78,6 +78,61 @@ def make_kernel_nso(text, functions):
         template[offset:offset + len(segment)] = segment
         template[0xA0 + i * 32:0xC0 + i * 32] = hashlib.sha256(segment).digest()
     return bytes(template)
+
+
+NATIVE_WAIT_MARKER = b'// Native wait capsule: independently authored, no original game boot claim.\n'
+
+
+def native_wait_header(tools):
+    """Independent import-free module; never relax the older client's imports."""
+    clang,objcopy=tools
+    suffix='.exe' if clang.suffix=='.exe' else ''
+    with tempfile.TemporaryDirectory(prefix='dm-native-wait-') as temporary:
+        directory=Path(temporary)
+        entry=directory/'entry.S'
+        entry.write_text(''' .text
+.global fixture_entry
+.type fixture_entry,%function
+fixture_entry:
+ b native_wait_entry
+.size fixture_entry,.-fixture_entry
+.word 0x40
+.org 0x40
+.ascii "MOD0"
+.word 0x8400-0x40,0x9000-0x40,0xa000-0x40,0,0,0x8300-0x40
+.org 0x100
+.global fixture_init
+.type fixture_init,%function
+fixture_init:
+ ret
+.size fixture_init,.-fixture_init
+''')
+        elf,binary=directory/'wait.elf',directory/'wait.bin'
+        subprocess.run([str(clang),'--target=aarch64-linux-android29','-nostdlib','-static',
+                        '-Wl,-T,'+str(ROOT/'dm/platform/android/module_fixtures/fixture.ld'),
+                        '-Wl,--build-id=none',str(entry),str(FIXTURES/'native_wait.S'),'-o',str(elf)],
+                       check=True,capture_output=True)
+        subprocess.run([str(objcopy),'-O','binary','--only-section=.text',str(elf),str(binary)],
+                       check=True,capture_output=True)
+        listing=subprocess.run([str(clang.parent/('llvm-nm'+suffix)),'-S','--defined-only',
+                                '--format=posix',str(elf)],check=True,capture_output=True,text=True).stdout
+        functions={}
+        for line in listing.splitlines():
+            fields=line.split()
+            if len(fields)==4 and fields[1]=='T':
+                functions[fields[0]]=(int(fields[2],16),int(fields[3],16),2)
+        exefs,output=directory/'exefs',directory/'prepared'
+        exefs.mkdir()
+        (exefs/'main').write_bytes(make_kernel_nso(binary.read_bytes(),functions,imports=()))
+        import_directory(exefs,output,('main',))
+        package=(output/'main.dmag').read_bytes()
+    lines=['alignas(8) static const uint8_t dm_native_wait_bytes[] = {']
+    for offset in range(0,len(package),24):
+        lines.append('    '+','.join(f'0x{x:02x}' for x in package[offset:offset+24])+',')
+    lines += ['};','static constexpr size_t dm_native_wait_size = sizeof(dm_native_wait_bytes);',
+              'static const uint8_t dm_native_wait_package_sha256[32] = {',
+              '    '+','.join(f'0x{x:02x}' for x in hashlib.sha256(package).digest())+',','};','']
+    return NATIVE_WAIT_MARKER+'\n'.join(lines).encode()
 
 
 def generate(tools):
@@ -96,7 +151,8 @@ def generate(tools):
         lines += ['};', 'static constexpr size_t dm_kernel_size = sizeof(dm_kernel_bytes);',
                   'static const uint8_t dm_kernel_package_sha256[32] = {',
                   '    ' + ','.join(f'0x{x:02x}' for x in hashlib.sha256(package).digest()) + ',', '};', '']
-        return {'kernel.nso': source, 'kernel.dmag': package, 'generated_kernel.h': '\n'.join(lines).encode(),
+        return {'kernel.nso': source, 'kernel.dmag': package,
+                'generated_kernel.h': '\n'.join(lines).encode()+native_wait_header(tools),
                 'import.json': (json.dumps(report, indent=2) + '\n').encode()}
 
 
@@ -104,7 +160,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--ndk')
     parser.add_argument('--check', action='store_true')
+    parser.add_argument('--native-wait-only',action='store_true',
+                        help='Regenerate/check only the independent native-wait capsule; retain legacy kernel bytes')
     args = parser.parse_args()
+    if args.native_wait_only:
+        target=FIXTURES/'generated_kernel.h'
+        prefix=target.read_bytes().split(NATIVE_WAIT_MARKER)[0]
+        content=prefix+native_wait_header(toolchain(args.ndk))
+        if args.check:
+            if target.read_bytes()!=content:
+                raise SystemExit(f'{target} native-wait capsule differs')
+        else:
+            target.write_bytes(content)
+        print('Verified native-wait production import' if args.check else 'Generated native-wait production import')
+        return
     for name, content in generate(toolchain(args.ndk)).items():
         target = FIXTURES / name
         if args.check:

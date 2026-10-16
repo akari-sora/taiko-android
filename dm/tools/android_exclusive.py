@@ -368,6 +368,80 @@ NATIVE_CONDITIONAL_WORDS = (
         0x6B0C017F, 0x54FFFEE1, 0x2A090188, 0x880C7D48,
         0x35FFFEAC, 0x5280002C, 0x2A1F03E8, 0x34FFFEAC,
     ),
+    (
+        0xD5033F5F, 0x2A1F03E3, 0x37001863, 0x5AC0120F,
+        0x4B0F0143, 0x2A1003EF, 0x6B0D007F, 0x54000321,
+        0x885F7D10, 0x6B0F021F, 0x54FFFEC1, 0x88037D0F,
+        0x35FFFEA3, 0x52800023, 0x3607FEA3, 0x140000B6,
+    ),
+    (
+        0xD5033F5F, 0x2A1F03E3, 0x37001663, 0x5AC0020F,
+        0x5AC011E3, 0x2A1003EF, 0x6B0D007F, 0x54000121,
+        0x885F7D10, 0x6B0F021F, 0x54FFFEC1, 0x88037D0F,
+        0x35FFFEA3, 0x52800023, 0x3607FEA3, 0x140000A6,
+    ),
+    (
+        0x885FFD0E, 0x6B0F01DF, 0x540000C1, 0x0A0D01EF,
+        0x88107D0F, 0x35000090, 0x5280002F, 0x14000003,
+        0xD5033F5F, 0x2A1F03EF, 0x3700008F, 0x0A0B01D0,
+        0x2A0E03EF, 0x35FFFE70,
+    ),
+    (
+        0x885F7D0F, 0x6B0501FF, 0x540000C1, 0x0A0600A7,
+        0x88137D07, 0x35000093, 0x52800027, 0x14000003,
+        0xD5033F5F, 0x2A1F03E7, 0x37000A67, 0x5AC011E5,
+        0x4B050147, 0x2A0F03E5, 0x6B0D00FF, 0x54FFFE20,
+        0x14000011,
+    ),
+    (
+        0x885F7D0F, 0x6B0501FF, 0x540000C1, 0x0A0600A7,
+        0x88137D07, 0x35000093, 0x52800027, 0x14000003,
+        0xD5033F5F, 0x2A1F03E7, 0x37000847, 0x5AC001E5,
+        0x5AC010A7, 0x2A0F03E5, 0x6B0D00FF, 0x54FFFE20,
+    ),
+    (
+        0x2A0C03ED, 0x2A0B018F, 0x885F7D0C, 0x6B0D019F,
+        0x540000A1, 0x880D7D0F, 0x3500008D, 0x5280002D,
+        0x14000003, 0xD5033F5F, 0x2A1F03ED, 0x3707FCAD,
+        0x6A0B019F, 0x2A0C03EF, 0x54FFFE40, 0x17FFFFE1,
+    ),
+    (
+        0x885F7D0E, 0x6B0501DF, 0x540000C1, 0x2A0B00AF,
+        0x88107D0F, 0x35000090, 0x5280002F, 0x14000003,
+        0xD5033F5F, 0x2A1F03EF, 0x3700008F, 0x6A0B01DF,
+        0x2A0E03E5, 0x54FFFE60,
+    ),
+    (
+        0xC85F7D4D, 0xEB0E01BF, 0x540000C1, 0xC80EFD4C,
+        0x350000AE, 0x5280002E, 0x3600018E, 0x14000004,
+        0xD5033F5F, 0x2A1F03EE, 0x3600010E,
+    ),
+    (
+        0x0A0B012A, 0x2A0903E5, 0x35FFF8AA, 0x885F7D09,
+        0x6B05013F, 0x540000C1, 0x2A0B00AA, 0x880C7D0A,
+        0x3500008C, 0x5280002A, 0x14000003, 0xD5033F5F,
+        0x2A1F03EA, 0x34FFFE6A, 0x17FFFFB9,
+    ),
+    (
+        0xC85F7D09, 0xB40000A9, 0xD5033F5F, 0x2A1F03EA,
+        0x360000CA, 0x1400000C, 0xC80AFD00, 0x340000CA,
+        0x2A1F03EA, 0x3700010A, 0xF9400FA0, 0xB4FFFEA9,
+        0x14000004, 0x5280002A, 0x3607FF8A, 0x14000002,
+    ),
+    (
+        0x0B09010A, 0x6B0B015F, 0x885F7E6A, 0x4B08016C,
+        0x1A89C189, 0x6B08015F, 0x540000E1, 0x0B08012B,
+        0x880CFE6B, 0x350000AC, 0x5280002B, 0x360000AB,
+        0x1400000B, 0xD5033F5F, 0x2A1F03EB, 0x3700010B,
+        0xB940126B, 0x6B0A017F, 0x2A0A03E8, 0x54FFFDA1,
+    ),
+    (
+        0x0B09010A, 0x6B0B015F, 0x885F7E6A, 0x4B08016C,
+        0x1A89C189, 0x6B08015F, 0x540000E1, 0x0B08012B,
+        0x880CFE6B, 0x350000AC, 0x5280002B, 0x360000AB,
+        0x1400000B, 0xD5033F5F, 0x2A1F03EB, 0x3700010B,
+        0xB94181AB, 0x6B0A017F, 0x2A0A03E8, 0x54FFFDA1,
+    ),
 )
 NATIVE_CONDITIONAL_FIELDS = (
     ((0,5),(5,16),(),(5,),(),(0,16),(),(0,5),(5,16),(),
@@ -389,7 +463,111 @@ NATIVE_CONDITIONAL_FIELDS = (
      (0,),(0,),(5,),(0,16),(),()),
     ((), (0, 5, 16), (0, 5, 10), (0, 5, 16), (0, 5, 16), (0, 5), (0, 5, 16), (0, 5), (0, 5), (0, 5, 16), (), (0, 5), (0,), (0, 5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (0, 5, 16), (0, 5), (0, 5, 16), (), (0, 5, 16), (0,), (0,), (), (0, 5, 16), (), (0, 5), (0, 5, 16), (), (0, 5, 16), (0, 5), (0, 5), (0, 5, 16), (0, 5, 16), (0, 5, 16), (0, 5), (0, 5, 16), (), (0, 5, 16), (0,)),
     ((), (0,), (0,), (0,), (0, 5, 16), (0, 16), (0,), (0, 5), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (0,), (0,)),
+    ((), (0, 16), (0,), (0, 5), (0, 5, 16), (0, 16), (5, 16), (), (0, 5), (5, 16), (), (0, 5, 16), (0,), (0,), (0,), ()),
+    ((), (0, 16), (0,), (0, 5), (0, 5), (0, 16), (5, 16), (), (0, 5), (5, 16), (), (0, 5, 16), (0,), (0,), (0,), ()),
+    ((0, 5), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0,), (0, 5, 16), (0, 16), (0,)),
+    ((0, 5), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (0, 5, 16), (0, 16), (5, 16), (), ()),
+    ((0, 5), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (0, 5), (0, 16), (5, 16), ()),
+    ((0, 16), (0, 5, 16), (0, 5), (5, 16), (), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0,), (5, 16), (0, 16), (), ()),
+    ((0, 5), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0,), (5, 16), (0, 16), ()),
+    ((0, 5), (5, 16), (), (0, 5, 16), (0,), (0,), (0,), (), (), (0, 16), (0,)),
+    ((0, 5, 16), (0, 16), (0,), (0, 5), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0,), ()),
+    ((0, 5), (0,), (), (0,), (0,), (), (0, 5, 16), (0,), (0,), (0,), (0,), (0,), (), (0,), (0,), ()),
+    ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
+    ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
 )
+
+
+NATIVE_WAIT_MUTEX_WORDS = (
+    0x79420268,0x91004014,0xF9800290,0x11000515,0x34000228,
+    0x52800029,0x79020275,0x885FFE8A,0x340000CA,0x79020268,
+    0xD503205F,0x79020275,0x885FFE8A,0x35FFFF8A,0x880A7E89,
+    0x340003CA,0x79020268,0x79020275,0x885FFE8A,0x35FFFECA,
+    0x17FFFFFA,0x52800036,0x79020275,0x885FFE88,0x350000C8,
+    0x1400000A,0xD503205F,0x79020275,0x885FFE88,0x340000C8,
+    0x7902027F,0x79420668,0x34FFFF48,0x94016893,0x17FFFFF8,
+    0x88087E96,0x34000128,0x7902027F,0x79420668,0x34FFFE88,
+    0x9401688C,0x79020275,0x885FFE88,0x35FFFE68,0x17FFFFF7,
+)
+NATIVE_WAIT_MUTEX_FIELDS = (
+    (0,5),(0,5),(5,),(0,5),(0,),(0,),(0,5),(0,5),(0,),(0,5),
+    (),(0,5),(0,5),(0,),(0,5,16),(0,),(0,5),(0,5),(0,5),(0,),
+    (),(0,),(0,5),(0,5),(0,),(),(),(0,5),(0,5),(0,),
+    (0,5),(0,5),(0,),(),(),(0,5,16),(0,),(0,5),(0,5),(0,),
+    (),(0,5),(0,5),(0,),(),
+)
+
+
+NATIVE_WAIT_MUTEX_COMPACT_WORDS = (
+    0x79420268,0x91004014,0xF9800290,0x11000515,0x34000228,
+    0x52800029,0x79020275,0x885FFE8A,0x340000CA,0x79020268,
+    0xD503205F,0x79020275,0x885FFE8A,0x35FFFF8A,0x880A7E89,
+    0x3400030A,0x79020268,0x79020275,0x885FFE8A,0x35FFFECA,
+    0x17FFFFFA,0x52800036,0x14000002,0xD503205F,0x79020275,
+    0x885FFE88,0x340000C8,0x7902027F,0x79420668,0x34FFFF48,
+    0x9400000C,0x17FFFFF8,0x88087E96,0x340000C8,0x7902027F,
+    0x79420668,0x34FFFE88,0x94000005,0x17FFFFF2,
+)
+NATIVE_WAIT_MUTEX_COMPACT_FIELDS = ((0, 5), (0, 5), (5,), (0, 5), (0,), (0,), (0, 5), (0, 5), (0,), (0, 5), (), (0, 5), (0, 5), (0,), (0, 5, 16), (0,), (0, 5), (0, 5), (0, 5), (0,), (), (0,), (), (), (0, 5), (0, 5), (0,), (0, 5), (0, 5), (0,), (), (), (0, 5, 16), (0,), (0, 5), (0, 5), (0,), (), ())
+
+# Two exact layouts share operand, TLR, callee and union validation. No
+# branch/order/width bits in the original 45-word row are generalized.
+NATIVE_WAIT_MUTEX_LAYOUTS = (
+    (NATIVE_WAIT_MUTEX_WORDS,NATIVE_WAIT_MUTEX_FIELDS,(33,40),(28,48,72,92,112,168)),
+    (NATIVE_WAIT_MUTEX_COMPACT_WORDS,NATIVE_WAIT_MUTEX_COMPACT_FIELDS,(30,37),(28,48,72,100)),
+)
+
+
+def native_wait_mutex(start, by_pc, kinds, api):
+    """Recognize two finite native WFE schedules with exact void SVC36 source.
+
+    Every call-return-to-store route executes a fresh LDAXR. TLS rewriting
+    precedes the native union; the caller still enforces whole-union entry,
+    overlap and head consumption. Actual WFE progress and dedicated void
+    SVC36 require the separately verified owned-TLR/event-stream platform.
+    """
+    begin=start.address-28
+    if begin<0:return None
+    for words,fields,call_indices,head_offsets in NATIVE_WAIT_MUTEX_LAYOUTS:
+        block=tuple(by_pc.get(begin+i*4) for i in range(len(words)))
+        if any(ins is None for ins in block):continue
+        roles,reverse,matched={},{},True
+        for index,(ins,expected,shifts) in enumerate(zip(block,words,fields)):
+            value=struct.unpack('<I',ins.bytes)[0]
+            mask=sum(31<<shift for shift in shifts)
+            if index in call_indices:mask|=0x3FFFFFF
+            if value&~mask!=expected&~mask:
+                matched=False;break
+            for shift in shifts:
+                role,actual=expected>>shift&31,value>>shift&31
+                if role==31:
+                    matched=actual==31
+                elif (actual in {18,29,30,31} or roles.get(role,actual)!=actual or
+                      reverse.get(actual,role)!=role):
+                    matched=False
+                else:roles[role],reverse[actual]=actual,role
+                if not matched:break
+            if not matched:break
+        if not matched:continue
+        nodes={ins.address for ins in block};tls=by_pc.get(begin-4)
+        if (tls is None or struct.unpack('<I',tls.bytes)[0]!=(0xD53BD060|roles[19]) or
+                kinds.get(begin-4,'missing')!=api.site_kind(tls)):continue
+        first,second=call_indices;callee=block[first].operands[-1].imm
+        if callee!=block[second].operands[-1].imm or callee in nodes or callee+4 in nodes:continue
+        stub,ret,exit_ins=by_pc.get(callee),by_pc.get(callee+4),by_pc.get(begin+len(words)*4)
+        if (stub is None or ret is None or exit_ins is None or
+                struct.unpack('<I',stub.bytes)[0]!=0xD40006C1 or
+                struct.unpack('<I',ret.bytes)[0]!=0xD65F03C0 or
+                api.is_fatal_instruction(exit_ins) or
+                kinds.get(callee,'missing')!=api.site_kind(stub) or
+                kinds.get(callee+4,'missing') is not None):continue
+        if any(kinds.get(pc,'missing') is not None for pc in nodes):
+            raise api.RewriteError(f'0x{begin:x}: source rewrite in native wait mutex')
+        for ins in block:
+            validate_memory_operands(ins,api)
+            if ins.mnemonic in api.EXCLUSIVE_LOADS|api.EXCLUSIVE_STORES:validate_exclusive(ins,api)
+        return nodes,begin,{begin+offset for offset in head_offsets}
+    return None
 
 
 def native_conditional_refresh(start, by_pc, kinds, api):
@@ -404,17 +582,18 @@ def native_conditional_refresh(start, by_pc, kinds, api):
     """
     for variant, (words, fields) in enumerate(zip(NATIVE_CONDITIONAL_WORDS,
                                                 NATIVE_CONDITIONAL_FIELDS)):
-        begin = start.address - (0,0,20,0,20,16,4,4,4,4,20,20,0,72,28)[variant]
+        begin = start.address - (0, 0, 20, 0, 20, 16, 4, 4, 4, 4, 20, 20, 0, 72, 28, 32, 32, 0, 0, 0, 8, 0, 0, 12, 0, 8, 8)[variant]
         block = tuple(by_pc.get(begin + i*4) for i in range(len(words)))
         if begin < 0 or any(ins is None for ins in block):
             continue
-        external = ((6,),(5,),(2,4),(4,9),(3,),(3,),(),(),(),(7,),(4,9),(4,9),(15,),(),())[variant]
+        external = ((6,), (5,), (2, 4), (4, 9), (3,), (3,), (), (), (), (7,), (4, 9), (4, 9), (15,), (), (), (2, 7, 15), (2, 15), (), (10, 16), (10,), (11, 15), (), (6, 10), (2, 14), (5, 9, 15), (12, 15), (12, 15))[variant]
         roles, reverse, matched = {}, {}, True
         for index, (ins, expected, shifts) in enumerate(zip(block, words, fields)):
             value = struct.unpack('<I', ins.bytes)[0]
             mask = sum(31 << shift for shift in shifts)
             if index in external:
-                mask |= 0x3FFFFFF if (variant,index) in ((3,9),(9,7),(10,9),(11,9),(12,15)) else 0x7FFFF << 5
+                bits = 14 if (variant,index) in ((15, 2), (16, 2), (18, 10), (19, 10), (20, 11), (22, 6), (22, 10), (24, 9), (25, 15), (26, 15)) else 19
+                mask |= 0x3FFFFFF if (variant,index) in ((3, 9), (9, 7), (10, 9), (11, 9), (12, 15), (15, 15), (16, 15), (18, 16), (20, 15), (23, 14), (24, 5), (24, 15), (25, 12), (26, 12)) else ((1 << bits) - 1) << 5
             if value & ~mask != expected & ~mask:
                 matched = False
                 break
@@ -435,6 +614,8 @@ def native_conditional_refresh(start, by_pc, kinds, api):
             continue
         nodes = {ins.address for ins in block}
         exits = [block[index].operands[-1].imm for index in external]
+        if variant in (25,26) and exits[0]!=exits[1]:
+            continue # This clamp row has one shared completed-attempt exit.
         exits.append(begin + len(words)*4)
         if any(pc in nodes or pc not in by_pc or api.is_fatal_instruction(by_pc[pc])
                for pc in exits):
@@ -445,8 +626,8 @@ def native_conditional_refresh(start, by_pc, kinds, api):
             validate_memory_operands(ins,api)
             if ins.mnemonic in api.EXCLUSIVE_LOADS | api.EXCLUSIVE_STORES:
                 validate_exclusive(ins,api)
-        entry = begin + (0,0,12,0,16,4,0,0,0,0,20,20,0,4,28)[variant]
-        heads = {begin+offset for offset in ((0,28),(0,28),(20,),(0,20),(20,),(16,),(4,),(4,),(4,),(4,),(20,),(20,),(0,),(72,144),(28,))[variant]}
+        entry = begin + (0, 0, 12, 0, 16, 4, 0, 0, 0, 0, 20, 20, 0, 4, 28, 32, 32, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0)[variant]
+        heads = {begin+offset for offset in ((0, 28), (0, 28), (20,), (0, 20), (20,), (16,), (4,), (4,), (4,), (4,), (20,), (20,), (0,), (72, 144), (28,), (32,), (32,), (0,), (0,), (0,), (8,), (0,), (0,), (12,), (0,), (8,), (8,))[variant]}
         return nodes,entry,heads
     return None
 
@@ -540,6 +721,72 @@ def virtual_boolean_preload_cas(start, by_pc, kinds, api):
                   frozenset(((begin+8,begin+76),(begin+16,invalid),(begin+72,begin+76))),*available[:2])
 
 
+NATIVE_POINTER_REFRESH_WORDS = (
+    0xD5033F5F, 0x2A1F03EF, 0xAA0E03ED, 0x35FFFE2F,
+    0x8A0801AE, 0xAA0B01CE, 0xF900052E, 0xF940200E,
+    0x8A0C01CC, 0x910005CF, 0x8A2E01AE, 0xAA0F018C,
+    0x8B0E018C, 0xC85F7D4E, 0xEB0D01DF, 0x54FFFE21,
+    0xC80DFD4C, 0x35FFFE0D, 0x5280002F, 0xAA0E03ED,
+    0x34FFFE0F, 0x17FFFFDF,
+)
+NATIVE_POINTER_REFRESH_FIELDS = (
+    (), (0,), (0, 5, 16), (0,), (0, 5, 16), (0, 5, 16),
+    (0, 5), (0, 5), (0, 5, 16), (0, 5), (0, 5, 16),
+    (0, 5, 16), (0, 5, 16), (0, 5), (0, 5, 16), (),
+    (0, 5, 16), (0,), (0,), (0, 5, 16), (0,), (),
+)
+
+
+def native_pointer_refresh(start, by_pc, kinds, api):
+    """Return (whole union, sole ordinary entry, sole exclusive head).
+
+    Ordinary payload memory accesses run before a fresh LDXR, after CLREX or
+    failed STLXR. The intentional expected/store-status alias is preserved.
+    The caller must enforce whole-union single-entry and overlap exclusion.
+    """
+    begin = start.address - 52
+    if begin < 0:
+        return None
+    block = tuple(by_pc.get(begin + offset) for offset in range(0, 88, 4))
+    if any(ins is None for ins in block):
+        return None
+    roles, reverse = {}, {}
+    for index, (ins, expected, fields) in enumerate(zip(
+            block, NATIVE_POINTER_REFRESH_WORDS, NATIVE_POINTER_REFRESH_FIELDS)):
+        value = struct.unpack('<I', ins.bytes)[0]
+        mask = sum(31 << shift for shift in fields)
+        if index == 3:
+            mask |= 0x7FFFF << 5
+        elif index == 21:
+            mask |= 0x3FFFFFF
+        if value & ~mask != expected & ~mask:
+            return None
+        for shift in fields:
+            role, actual = expected >> shift & 31, value >> shift & 31
+            if role == 31:
+                if actual != 31:
+                    return None
+            elif (actual in {18, 29, 30, 31} or
+                  roles.get(role, actual) != actual or
+                  reverse.get(actual, role) != role):
+                return None
+            else:
+                roles[role], reverse[actual] = actual, role
+    nodes = {ins.address for ins in block}
+    exit_pc = block[3].operands[-1].imm
+    if (exit_pc != block[21].operands[-1].imm or exit_pc in nodes or
+            exit_pc not in by_pc or api.is_fatal_instruction(by_pc[exit_pc])):
+        return None
+    if any(kinds.get(pc, 'missing') is not None for pc in nodes):
+        raise api.RewriteError(f'0x{begin:x}: source rewrite in native pointer refresh')
+    for ins in block:
+        validate_memory_operands(ins, api)
+        if ins.mnemonic in api.EXCLUSIVE_LOADS | api.EXCLUSIVE_STORES:
+            validate_exclusive(ins, api)
+    return nodes, begin + 16, {begin + 52}
+
+
+
 def native_closed_call_tail(start, body, terminals, by_pc, kinds, api):
     """A native lock calls its slow path only after STORE or CLREX.
 
@@ -614,11 +861,57 @@ def native_shared_clear(start, by_pc, kinds, api):
     return nodes,{begin,begin+24}
 
 
-def plan_regions(instructions, kinds, entry_offsets, api):
+def require_native_wait_transfers(instructions, by_pc, kinds, entries, protected, producer, facts, api):
+    """Only wait opt-in requires complete facts for selected indirect transfers.
+
+    The rewrite caller derives these from validated lowering plans, never from
+    an offset-only whitelist. Host facts mean actual checked host gates, not
+    native RX authority. Finite guest targets retain all source-entry checks.
+    """
+    facts={} if facts is None else facts
+    if not isinstance(facts,dict):
+        raise api.RewriteError('native wait transfer facts must be a mapping')
+    entries=set(entries)
+    for ins in instructions:
+        if ins.group(CS_GRP_RET) and ins.op_str not in ('','x30'):
+            raise api.RewriteError(f'0x{ins.address:x}: unsupported indirect return before native wait')
+        if ins.mnemonic not in ('br','blr'):continue
+        fact=facts.get(ins.address)
+        if not isinstance(fact,tuple) or len(fact)!=2:
+            raise api.RewriteError(f'0x{ins.address:x}: native wait lacks explicit processed transfer facts')
+        kind,targets=fact
+        if kind=='host':
+            if targets!=() or kinds.get(ins.address)!='gate':
+                raise api.RewriteError(f'0x{ins.address:x}: native wait host fact is not a lowered checked gate')
+            continue
+        expected={'finite':(None,'byte_jump'),'checked-call':('checked_call',),
+                  'checked-call-forest':('checked_call_forest_stub',)}
+        if (kind not in expected or kinds.get(ins.address) not in expected[kind] or
+                ins.mnemonic!=('br' if kind=='finite' else 'blr') or
+                not isinstance(targets,tuple) or not targets or
+                any(type(target) is not int or target not in by_pc or target not in entries for target in targets)):
+            raise api.RewriteError(f'0x{ins.address:x}: native wait finite transfer lacks complete selected entry facts')
+        if (set(targets)&protected)-{producer}:
+            raise api.RewriteError(f'0x{ins.address:x}: native wait transfer bypasses its TLR producer')
+
+
+def plan_regions(instructions, kinds, entry_offsets, api, *, native_wait_transfers=None):
     by_pc = {ins.address: ins for ins in instructions}
     regions, occupied, consumed = [], set(), set()
     for start in instructions:
         if start.mnemonic not in api.EXCLUSIVE_LOADS or start.address in consumed:
+            continue
+        native_wait=native_wait_mutex(start,by_pc,kinds,api)
+        if native_wait is not None:
+            nodes,entry,heads=native_wait
+            # The producer remains an ordinary rewritten TLS instruction,
+            # but it is the only external entry for this native wait proof.
+            producer=entry-4;protected=nodes|{producer}
+            if occupied&protected:
+                raise api.RewriteError(f'0x{producer:x}: overlapping exclusive windows')
+            require_single_entry(protected,producer,instructions,entry_offsets,api)
+            require_native_wait_transfers(instructions,by_pc,kinds,entry_offsets,protected,producer,native_wait_transfers,api)
+            occupied.update(protected);consumed.update(heads)
             continue
         native_entry=native_compare_retry(start,by_pc,kinds,api)
         if native_entry is not None:
@@ -663,6 +956,14 @@ def plan_regions(instructions, kinds, entry_offsets, api):
             require_single_entry(nodes, start.address, instructions, entry_offsets, api)
             occupied.update(nodes)
             consumed.add(start.address + 12)
+            continue
+        pointer=native_pointer_refresh(start,by_pc,kinds,api)
+        if pointer is not None:
+            nodes,entry,heads=pointer
+            if occupied&nodes:
+                raise api.RewriteError(f'0x{entry:x}: overlapping exclusive windows')
+            require_single_entry(nodes,entry,instructions,entry_offsets,api)
+            occupied.update(nodes);consumed.update(heads)
             continue
         preload=virtual_preload_cas(start,by_pc,kinds,api)
         if preload is None:

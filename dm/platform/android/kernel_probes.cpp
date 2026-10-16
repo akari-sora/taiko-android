@@ -1,8 +1,12 @@
 #include "kernel_probes.h"
 #include "kernel_runtime.h"
 #include "kernel_platform.h"
+#include "kernel_thread_adapter.h"
 #include "kernel_fixtures/generated_kernel.h"
 #include <array>
+#include <atomic>
+#include <android/log.h>
+#include <sys/auxv.h>
 #include <cerrno>
 #include <cstring>
 #include <sstream>
@@ -281,5 +285,182 @@ std::string dm_android_run_kernel_probes() {
              << "\",\"detail\":\"" << escape(checks[i].detail) << "\"}";
     }
     json << "],\"gates\":{\"G1\":\"NOT_RUN\",\"G2\":\"NOT_RUN\",\"G3\":\"NOT_RUN\",\"G4\":\"NOT_RUN\",\"G5\":\"NOT_RUN\",\"G6\":\"NOT_RUN\"}}";
+    return json.str();
+}
+
+namespace {
+struct alignas(16) NativeWaitFrames {
+    uint64_t before_guard[2]{0x1122334455667788,0x8877665544332211};
+    DmGuestRegisterFrame frames[2]{};
+    uint64_t after_guard[2]{0xaabbccddeeff0011,0x1100ffeeddccbbaa};
+    bool guards() const {
+        return before_guard[0]==0x1122334455667788 && before_guard[1]==0x8877665544332211 &&
+               after_guard[0]==0xaabbccddeeff0011 && after_guard[1]==0x1100ffeeddccbbaa;
+    }
+};
+struct alignas(16) NativeWaitMutex {
+    uint64_t before[2]{0x1020304050607080,0x8070605040302010};
+    uint32_t cell=0;
+    uint32_t adjacent=0xabcdef12;
+    uint64_t after=0x8877665544332211;
+    bool guards() const {
+        return before[0]==0x1020304050607080 && before[1]==0x8070605040302010 &&
+               adjacent==0xabcdef12 && after==0x8877665544332211;
+    }
+};
+static_assert(offsetof(NativeWaitMutex,cell)==16);
+struct HostWaitState {uint64_t x18,tp,sp;};
+__attribute__((always_inline)) inline HostWaitState host_wait_state() {
+    HostWaitState state{};
+    asm volatile("mov %0,x18\n mrs %1,tpidr_el0\n mov %2,sp"
+                 :"=r"(state.x18),"=r"(state.tp),"=r"(state.sp));
+    return state;
+}
+bool same_host_wait_state(const HostWaitState& a,const HostWaitState& b) {
+    return a.x18==b.x18 && a.tp==b.tp && a.sp==b.sp;
+}
+struct WaitRelease {
+    uint16_t* count=nullptr;
+    uint32_t* cell=nullptr;
+    uint16_t old_count=0;
+    std::atomic<bool> stop{false},saw_increment{false},saw_restore{false},released{false};
+};
+void* native_wait_release(void* opaque) {
+    auto& watch=*static_cast<WaitRelease*>(opaque);
+    const uint16_t incremented=static_cast<uint16_t>(watch.old_count+1);
+    // Observe the real guest's busy path before the sole external release.
+    // No SEV/SEVL, signal, sleep, yield, or periodic rescue manufactures a wake.
+    while(!watch.stop.load(std::memory_order_acquire)) {
+        const uint16_t value=__atomic_load_n(watch.count,__ATOMIC_ACQUIRE);
+        if(value==incremented)watch.saw_increment.store(true,std::memory_order_release);
+        if(watch.saw_increment.load(std::memory_order_acquire) && value==watch.old_count) {
+            watch.saw_restore.store(true,std::memory_order_release);
+            if(__atomic_load_n(watch.cell,__ATOMIC_ACQUIRE)!=1)return nullptr;
+            __atomic_store_n(watch.cell,uint32_t{0},__ATOMIC_RELEASE);
+            watch.released.store(true,std::memory_order_release);
+            return nullptr;
+        }
+    }
+    return nullptr;
+}
+bool native_wait_frames_equal(const NativeWaitFrames& snapshots,bool svc_only) {
+    const auto& before=snapshots.frames[0];const auto& after=snapshots.frames[1];
+    if(!snapshots.guards() || before.guest_sp!=after.guest_sp || before.nzcv!=after.nzcv ||
+       before.fpsr!=after.fpsr || before.fpcr!=after.fpcr ||
+       std::memcmp(before.q,after.q,sizeof(before.q)))return false;
+    for(unsigned reg=0;reg<31;++reg) {
+        // The busy-mutex ABI clobbers only these caller-saved registers. BL
+        // changes x30; the complete callee-saved set and virtual x18 stay equal.
+        if(!svc_only && (reg==8 || reg==9 || reg==10 || reg==30))continue;
+        if(before.x[reg]!=after.x[reg])return false;
+    }
+    return before.nzcv==0xb0000000 && before.x[18]==0x1818181818181818;
+}
+}
+
+std::string dm_android_run_native_wait_probe() {
+    const unsigned long hwcap=getauxval(AT_HWCAP);
+    const bool capable=dm_android::native_wait_event_stream_capable(hwcap) &&
+                       dm_android::native_wait_event_stream_available();
+    std::string error;
+    bool passed=capable,ready=false;
+    uint64_t svc_calls=0;
+    unsigned cases=0,contentions=0;
+    unsigned layout_cases[2]{},layout_contentions[2]{};
+    HleRuntime runtime;
+    GuestEnvironment environment;
+    GuestStack stack(256*1024);
+    uintptr_t wait_entries[2]{},svc_entry=0;
+    constexpr const char* wait_symbols[]{"native_wait_entry","native_wait_compact_entry"};
+    if(capable) {
+        std::unique_ptr<ModulePackage> package;
+        ready=stack.valid() && decode_package(dm_native_wait_bytes,dm_native_wait_size,
+              dm_native_wait_package_sha256,&package,&error);
+        if(ready) {
+            std::vector<std::unique_ptr<ModulePackage>> packages;
+            packages.push_back(std::move(package));
+            ready=runtime.load(std::move(packages),false,nullptr,nullptr,&error);
+        }
+        if(ready) {
+            runtime.configure(environment.state); // Same host pthread as every call below.
+            environment.state.virtual_x18=0x1818181818181818;
+            ready=runtime.register_main()!=0 && runtime.process().symbol(wait_symbols[0],&wait_entries[0]) &&
+                  runtime.process().symbol(wait_symbols[1],&wait_entries[1]) &&
+                  runtime.process().symbol("native_wait_svc_frame_entry",&svc_entry);
+        }
+        passed=ready;
+    } else error="AT_HWCAP lacks supported EVTSTRM; native WFE execution was not attempted";
+    auto* tlr=reinterpret_cast<uint8_t*>(environment.state.guest_tpidrro_el0);
+    if(ready) {
+        NativeWaitFrames snapshots;
+        std::array<uint8_t,0x200> tlr_before{};
+        std::memcpy(tlr_before.data(),tlr,tlr_before.size());
+        GuestCallResult result;
+        const auto host_before=host_wait_state();
+        const bool called=stack.call(environment.state,svc_entry,reinterpret_cast<uintptr_t>(snapshots.frames),&result,&error);
+        const auto host_after=host_wait_state();
+        svc_calls=runtime.svc_count(0x36);
+        passed=called && !result.exited && result.value==0 && svc_calls==1 &&
+            native_wait_frames_equal(snapshots,true) && same_host_wait_state(host_before,host_after) &&
+            !std::memcmp(tlr_before.data(),tlr,tlr_before.size()) && !dm_android_peek_guest_state();
+        if(!passed && error.empty())error="owned SVC36 frame/TLR/host-state preservation failed";
+    }
+    for(unsigned layout=0;passed && layout<2;++layout) {
+    for(unsigned index=0;passed && index<5;++index) {
+        const uint16_t old_count=index==0 ? 0 : index==1 ? 7 : index==2 ? 0xffff : index==3 ? 0 : 7;
+        const bool contended=index>=3;
+        NativeWaitMutex mutex;
+        NativeWaitFrames snapshots;
+        mutex.cell=contended ? 1 : 0;
+        std::memcpy(tlr+0x100,&old_count,sizeof(old_count));
+        const uint16_t zero=0;std::memcpy(tlr+0x102,&zero,sizeof(zero));
+        std::array<uint8_t,0x200> tlr_before{};
+        std::memcpy(tlr_before.data(),tlr,tlr_before.size());
+        WaitRelease watch;watch.count=reinterpret_cast<uint16_t*>(tlr+0x100);
+        watch.cell=&mutex.cell;watch.old_count=old_count;
+        pthread_t producer{};
+        bool created=false;
+        if(contended) {
+            created=pthread_create(&producer,nullptr,native_wait_release,&watch)==0;
+            if(!created){passed=false;error="cannot create external release producer";break;}
+        }
+        __android_log_print(ANDROID_LOG_INFO,"DmNativeWait","enter layout=%s case=%u old=%u contended=%u hwcap=%lx",
+                            wait_symbols[layout],index,unsigned(old_count),unsigned(contended),hwcap);
+        const uint64_t args[]{reinterpret_cast<uintptr_t>(&mutex),reinterpret_cast<uintptr_t>(snapshots.frames)};
+        GuestCallResult result;
+        const auto host_before=host_wait_state();
+        const bool called=stack.call(environment.state,wait_entries[layout],args,2,&result,&error);
+        const auto host_after=host_wait_state();
+        watch.stop.store(true,std::memory_order_release);
+        const bool joined=!created || pthread_join(producer,nullptr)==0;
+        const uint16_t incremented=static_cast<uint16_t>(old_count+1);
+        std::memcpy(tlr_before.data()+0x100,&incremented,sizeof(incremented));
+        passed=called && !result.exited && result.value==0 && joined && mutex.guards() &&
+            __atomic_load_n(&mutex.cell,__ATOMIC_ACQUIRE)==1 && native_wait_frames_equal(snapshots,false) &&
+            same_host_wait_state(host_before,host_after) && !dm_android_peek_guest_state() &&
+            !std::memcmp(tlr_before.data(),tlr,tlr_before.size()) && runtime.svc_count(0x36)==svc_calls;
+        if(contended)passed=passed && watch.saw_increment.load() && watch.saw_restore.load() && watch.released.load();
+        if(passed){++cases;++layout_cases[layout];if(contended){++contentions;++layout_contentions[layout];}}
+        else if(error.empty())error="native wait acquisition/count/frame/guards or observed busy path failed at "+std::string(wait_symbols[layout])+" case "+std::to_string(index);
+        __android_log_print(ANDROID_LOG_INFO,"DmNativeWait","leave layout=%s case=%u passed=%u",wait_symbols[layout],index,unsigned(passed));
+    }
+    }
+    std::string close_error;
+    const bool closed=runtime.shutdown(&close_error);
+    if(!closed){passed=false;if(error.empty())error="native wait teardown failed: "+close_error;}
+    unsigned handles=0,live=0,objects=0;
+    dm_android_kernel_thread_stats(&handles,&live,&objects);
+    if(handles || live || objects || !runtime.process().modules().empty() || dm_android_peek_guest_state()) {
+        passed=false;if(error.empty())error="native wait resources did not retire";
+    }
+    std::ostringstream json;
+    json<<"{\"schemaVersion\":2,\"syntheticOnly\":true,\"gamePlayable\":false,\"originalSdk\":\"NOT_RUN\","
+        <<"\"status\":\""<<(passed?"PASS":capable?"FAIL":"UNSUPPORTED")<<"\",\"hwcap\":"<<hwcap
+        <<",\"eventStream\":"<<(capable?"true":"false")<<",\"svc36Calls\":"<<svc_calls
+        <<",\"mutexCases\":"<<cases<<",\"contendedCases\":"<<contentions
+        <<",\"layouts\":[{\"symbol\":\"native_wait_entry\",\"nativeUnionWords\":45,\"mutexCases\":"<<layout_cases[0]
+        <<",\"contendedCases\":"<<layout_contentions[0]<<"},{\"symbol\":\"native_wait_compact_entry\",\"nativeUnionWords\":39,\"mutexCases\":"<<layout_cases[1]
+        <<",\"contendedCases\":"<<layout_contentions[1]<<"}]"
+        <<",\"hardwareFailedStores\":\"NOT_MEASURED\",\"detail\":\""<<escape(error)<<"\"}";
     return json.str();
 }

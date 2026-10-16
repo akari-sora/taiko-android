@@ -371,6 +371,19 @@ Java_org_d2rmobile_diagnostics_MainActivity_runKernelDiagnostics(JNIEnv* env, jo
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_org_d2rmobile_diagnostics_NativeWaitTest_nativeWait(JNIEnv* env, jobject) {
+    auto call=enter_group(env,DiagnosticGroup::Kernel,0);if(!call) return nullptr;
+    std::string result;
+    {
+        ProbeLock lock;
+        result=dm_android_run_native_wait_probe();
+    }
+    if(!complete_group(env,call)) return nullptr;
+    __android_log_print(ANDROID_LOG_INFO, "DmNativeWait", "%s", result.c_str());
+    return env->NewStringUTF(result.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_org_d2rmobile_diagnostics_MainActivity_runServiceDiagnostics(JNIEnv* env, jobject activity, jlong owner) {
     auto call=enter_group(env,DiagnosticGroup::Services,owner);if(!call) return nullptr;
     jclass activity_class = env->GetObjectClass(activity);

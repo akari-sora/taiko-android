@@ -3749,7 +3749,17 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
     for parameter in parameters.values():
         kinds[parameter.a] = 'parameter'
         kinds[parameter.b] = 'parameter_tail'
-    regions = android_exclusive.plan_regions(instructions, kinds, roots, sys.modules[__name__])
+    # Native wait is an explicit opt-in. Unknown raw transfers cannot prove
+    # that its ordinary TLS producer executes. Supply only already validated
+    # lowering facts, including the entire finite guest case-entry set.
+    native_wait_transfers={pc:('host',()) for pc in guarded}
+    for pc,plan in {**byte_jumps,**native_tables}.items():
+        values=plan['target_values'] if 'target_values' in plan else range(plan['count'])
+        native_wait_transfers[pc]=('finite',tuple(sorted({plan['base']+value*4 for value in values})))
+    native_wait_transfers.update((pc,('checked-call',(target,))) for pc,target in checked_calls.items())
+    native_wait_transfers.update((pc,('checked-call-forest',forest_targets)) for pc in forest_sites)
+    regions = android_exclusive.plan_regions(instructions, kinds, roots, sys.modules[__name__],
+                                            native_wait_transfers=native_wait_transfers)
     region_entries = {region.entry: region for region in regions}
     region_words = {ins.address for region in regions for ins in region.instructions}
     if any(region_words & set(range(p.get('proof_start_offset',p.get('zero_extend_offset')),p['offset']+4,4)) for p in table_loads.values()):
