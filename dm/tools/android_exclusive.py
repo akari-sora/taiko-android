@@ -349,6 +349,25 @@ NATIVE_CONDITIONAL_WORDS = (
      0x880B7F0A, 0x350000AB, 0x5280002A, 0x360000AA,
      0x14000008, 0xD5033F5F, 0x2A1F03EA, 0x370000AA,
      0x7100053F, 0x2A0903EA, 0x54FFFE4A, 0x1400003F),
+    (
+        0xD5033F5F, 0xAA0803ED, 0xA943AC0C, 0x8A0D016B,
+        0xAA0C016C, 0x9100218B, 0xAA0D03E8, 0xC8DFFD6B,
+        0xF940012D, 0xEB0D011F, 0x54FFFF01, 0xF940200D,
+        0x3700024B, 0x8A0B01AB, 0x910005AC, 0xAA0C016B,
+        0x8A2D010C, 0x8B0C016B, 0xC85F7D2C, 0xEB08019F,
+        0x540000A1, 0xC80D7D2B, 0x35FFFF8D, 0x52800028,
+        0x14000003, 0x2A1F03E8, 0xD5033F5F, 0x7100011F,
+        0x9A8C116D, 0x17FFFFE5, 0x8A0A01AA, 0x910005AE,
+        0x9100218C, 0xAA0E014A, 0x8A2D016D, 0x8B0D014A,
+        0xC85FFD8D, 0xEB0B01BF, 0x54FFFB41, 0xC80B7D8A,
+        0x35FFFB2B,
+    ),
+    (
+        0xD5033F5F, 0x2A1F03EC, 0x2A1F03E8, 0x350001AC,
+        0x0A09016D, 0x2A0B03EC, 0x3500014D, 0x885F7D4B,
+        0x6B0C017F, 0x54FFFEE1, 0x2A090188, 0x880C7D48,
+        0x35FFFEAC, 0x5280002C, 0x2A1F03E8, 0x34FFFEAC,
+    ),
 )
 NATIVE_CONDITIONAL_FIELDS = (
     ((0,5),(5,16),(),(5,),(),(0,16),(),(0,5),(5,16),(),
@@ -368,6 +387,8 @@ NATIVE_CONDITIONAL_FIELDS = (
     ((),(0,5),(0,5),(5,16),(),(0,5),(0,),(0,5,16),(0,),()),
     ((0,5),(5,16),(),(0,5),(0,5,16),(0,),(0,),(0,),(),(),
      (0,),(0,),(5,),(0,16),(),()),
+    ((), (0, 5, 16), (0, 5, 10), (0, 5, 16), (0, 5, 16), (0, 5), (0, 5, 16), (0, 5), (0, 5), (0, 5, 16), (), (0, 5), (0,), (0, 5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (0, 5, 16), (0, 5), (0, 5, 16), (), (0, 5, 16), (0,), (0,), (), (0, 5, 16), (), (0, 5), (0, 5, 16), (), (0, 5, 16), (0, 5), (0, 5), (0, 5, 16), (0, 5, 16), (0, 5, 16), (0, 5), (0, 5, 16), (), (0, 5, 16), (0,)),
+    ((), (0,), (0,), (0,), (0, 5, 16), (0, 16), (0,), (0, 5), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (0,), (0,)),
 )
 
 
@@ -383,11 +404,11 @@ def native_conditional_refresh(start, by_pc, kinds, api):
     """
     for variant, (words, fields) in enumerate(zip(NATIVE_CONDITIONAL_WORDS,
                                                 NATIVE_CONDITIONAL_FIELDS)):
-        begin = start.address - (0,0,20,0,20,16,4,4,4,4,20,20,0)[variant]
+        begin = start.address - (0,0,20,0,20,16,4,4,4,4,20,20,0,72,28)[variant]
         block = tuple(by_pc.get(begin + i*4) for i in range(len(words)))
         if begin < 0 or any(ins is None for ins in block):
             continue
-        external = ((6,),(5,),(2,4),(4,9),(3,),(3,),(),(),(),(7,),(4,9),(4,9),(15,))[variant]
+        external = ((6,),(5,),(2,4),(4,9),(3,),(3,),(),(),(),(7,),(4,9),(4,9),(15,),(),())[variant]
         roles, reverse, matched = {}, {}, True
         for index, (ins, expected, shifts) in enumerate(zip(block, words, fields)):
             value = struct.unpack('<I', ins.bytes)[0]
@@ -424,11 +445,99 @@ def native_conditional_refresh(start, by_pc, kinds, api):
             validate_memory_operands(ins,api)
             if ins.mnemonic in api.EXCLUSIVE_LOADS | api.EXCLUSIVE_STORES:
                 validate_exclusive(ins,api)
-        entry = begin + (0,0,12,0,16,4,0,0,0,0,20,20,0)[variant]
-        heads = {begin+offset for offset in ((0,28),(0,28),(20,),(0,20),(20,),(16,),(4,),(4,),(4,),(4,),(20,),(20,),(0,))[variant]}
+        entry = begin + (0,0,12,0,16,4,0,0,0,0,20,20,0,4,28)[variant]
+        heads = {begin+offset for offset in ((0,28),(0,28),(20,),(0,20),(20,),(16,),(4,),(4,),(4,),(4,),(20,),(20,),(0,),(72,144),(28,))[variant]}
         return nodes,entry,heads
     return None
 
+
+
+def virtual_preload_cas(start, by_pc, kinds, api):
+    """Relocate one tagged-pointer CAS, including its closed retry preload.
+
+    The approved entry precedes the exclusive load. CLREX and failed STXR stay
+    inside the same frame; only success and the invalid-tag branch publish X18.
+    """
+    begin=start.address-24;entry=start.address-12
+    if begin<0:return None
+    block=tuple(by_pc.get(begin+offset) for offset in range(0,60,4))
+    if any(op is None for op in block) or block[2].mnemonic!='tbnz':return None
+    values=tuple(struct.unpack('<I',op.bytes)[0] for op in block)
+    loaded=values[6]&31;cell=values[6]>>5&31;expected=values[1]&31
+    pointer=values[3]&31;mask=values[3]>>16&31;tag=values[4]>>16&31
+    other_mask=values[11]>>16&31;other_tag=values[10]>>16&31
+    invalid=block[2].operands[-1].imm
+    nodes={op.address for op in block}
+    if invalid in nodes or invalid not in by_pc or begin+60 not in by_pc:return None
+    words=(0xD5033F5F,0xAA0003E0|loaded<<16|expected,
+           0x37000000|(((invalid-begin-8)//4)&0x3FFF)<<5|loaded,
+           0x8A000000|mask<<16|expected<<5|pointer,
+           0xAA000000|tag<<16|pointer<<5|pointer,0xF9400412|pointer<<5,
+           0xC85F7C00|cell<<5|loaded,0xEB00001F|expected<<16|loaded<<5,
+           0x54FFFF01,0x8A000252|mask<<16,0xAA000252|other_tag<<16,
+           0x8A000000|other_mask<<16|expected<<5|expected,
+           0x8B000240|expected<<16|expected,0xC8127C00|cell<<5|expected,0x35FFFE72)
+    if values!=words:return None
+    roles=(loaded,cell,expected,pointer,mask,tag,other_mask,other_tag)
+    if len(set(roles))!=8 or any(reg in {18,29,30,31} for reg in roles):
+        raise api.RewriteError(f'0x{begin:x}: unsupported registers in virtual preload CAS')
+    if any(kinds[pc] not in {None,'x18'} for pc in nodes):
+        raise api.RewriteError(f'0x{begin:x}: unsupported ABI rewrite in virtual preload CAS')
+    for op in block:
+        validate_memory_operands(op,api)
+        if op.mnemonic in api.EXCLUSIVE_LOADS|api.EXCLUSIVE_STORES:validate_exclusive(op,api)
+    used=set().union(*(api.registers(op) for op in block))
+    available=[reg for reg in range(16) if reg not in used]
+    if len(available)<2:
+        raise api.RewriteError(f'0x{begin:x}: insufficient unused registers for virtual preload CAS')
+    return Region(entry,block,frozenset((begin,begin+52)),
+                  frozenset(((begin+32,begin),(begin+56,begin+4))),
+                  frozenset(((begin+8,invalid),(begin+56,begin+60))),*available[:2])
+
+
+
+def virtual_boolean_preload_cas(start, by_pc, kinds, api):
+    """Exact boolean-result sibling of the shared tagged-pointer CAS layout.
+
+    Reuse Region and the unchanged single-frame emitter. The source W18 status,
+    both boolean joins and all pointer payload reads stay inside that frame.
+    """
+    begin=start.address-32;entry=start.address-12
+    if begin<0:return None
+    block=tuple(by_pc.get(begin+offset) for offset in range(0,76,4))
+    if any(op is None for op in block) or block[4].mnemonic!='tbnz':return None
+    values=tuple(struct.unpack('<I',op.bytes)[0] for op in block)
+    loaded=values[8]&31;cell=values[8]>>5&31;expected=values[3]&31
+    pointer=values[5]&31;mask=values[5]>>16&31;tag=values[6]>>16&31
+    other_mask=values[13]>>16&31;other_tag=values[12]>>16&31
+    invalid=block[4].operands[-1].imm;nodes={op.address for op in block}
+    if invalid in nodes or invalid not in by_pc or begin+76 not in by_pc:return None
+    words=(0xD5033F5F,0x2A1F03E0|expected,0x37000220|expected,
+           0xAA0003E0|loaded<<16|expected,
+           0x37000000|(((invalid-begin-16)//4)&0x3FFF)<<5|loaded,
+           0x8A000000|mask<<16|expected<<5|pointer,
+           0xAA000000|tag<<16|pointer<<5|pointer,0xF9400412|pointer<<5,
+           0xC85F7C00|cell<<5|loaded,0xEB00001F|expected<<16|loaded<<5,
+           0x54FFFEC1,0x8A000252|mask<<16,0xAA000252|other_tag<<16,
+           0x8A000000|other_mask<<16|expected<<5|expected,
+           0x8B000240|expected<<16|expected,0xC8127C00|cell<<5|expected,
+           0x35FFFE32,0x52800020|expected,0x3607FE20|expected)
+    if values!=words:return None
+    roles=(loaded,cell,expected,pointer,mask,tag,other_mask,other_tag)
+    if len(set(roles))!=8 or any(reg in {18,29,30,31} for reg in roles):
+        raise api.RewriteError(f'0x{begin:x}: unsupported registers in virtual boolean preload CAS')
+    if any(kinds[pc] not in {None,'x18'} for pc in nodes):
+        raise api.RewriteError(f'0x{begin:x}: unsupported ABI rewrite in virtual boolean preload CAS')
+    for op in block:
+        validate_memory_operands(op,api)
+        if op.mnemonic in api.EXCLUSIVE_LOADS|api.EXCLUSIVE_STORES:validate_exclusive(op,api)
+    used=set().union(*(api.registers(op) for op in block))
+    available=[reg for reg in range(16) if reg not in used]
+    if len(available)<2:
+        raise api.RewriteError(f'0x{begin:x}: insufficient unused registers for virtual boolean preload CAS')
+    return Region(entry,block,frozenset((begin,begin+60)),
+                  frozenset(((begin+40,begin),(begin+64,begin+4),(begin+72,begin+12))),
+                  frozenset(((begin+8,begin+76),(begin+16,invalid),(begin+72,begin+76))),*available[:2])
 
 
 def native_closed_call_tail(start, body, terminals, by_pc, kinds, api):
@@ -554,6 +663,17 @@ def plan_regions(instructions, kinds, entry_offsets, api):
             require_single_entry(nodes, start.address, instructions, entry_offsets, api)
             occupied.update(nodes)
             consumed.add(start.address + 12)
+            continue
+        preload=virtual_preload_cas(start,by_pc,kinds,api)
+        if preload is None:
+            preload=virtual_boolean_preload_cas(start,by_pc,kinds,api)
+        if preload is not None:
+            nodes={op.address for op in preload.instructions}
+            if occupied&nodes:
+                raise api.RewriteError(f'0x{preload.entry:x}: overlapping exclusive windows')
+            require_acyclic(nodes,by_pc,preload.retry_edges,preload.exit_edges,api)
+            require_single_entry(nodes,preload.entry,instructions,entry_offsets,api)
+            occupied.update(nodes);consumed.add(start.address);regions.append(preload)
             continue
         colors, terminals = {}, set()
         pending = [(start.address, False)]

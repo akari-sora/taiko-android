@@ -1979,7 +1979,7 @@ def _assembled_byte_readonly_table(ins, by_pc, entries, raw, readonly_ranges):
     return None
 
 
-def _reaching_table_candidates(load, register, current_branch, by_pc, candidates, known_tables):
+def _reaching_table_candidates(load, register, current_branch, by_pc, candidates, known_tables, *, exclude_closed=False):
     """Select one constant over bounded selected CFG; never authorize an entry.
 
     known_tables contains only the caller's independently validated plan maps.
@@ -1988,7 +1988,7 @@ def _reaching_table_candidates(load, register, current_branch, by_pc, candidates
     """
     start=max(0,load-4096);end=load+4096
     selected={pc:by_pc[pc] for pc in range(start,end,4) if pc in by_pc}
-    predecessors={pc:set() for pc in selected};edges={}
+    predecessors={pc:set() for pc in selected};edges={};successor_edges={}
     for collection in known_tables:
         for pc,plan in collection.items():
             if pc==current_branch or pc not in selected:
@@ -2014,8 +2014,36 @@ def _reaching_table_candidates(load, register, current_branch, by_pc, candidates
             successors=() # Unresolved transfers supply no candidate proof.
         else:
             successors=(pc+4,)
+        successor_edges[pc]=successors
         for target in successors:
             if target in predecessors:predecessors[target].add(pc)
+    if exclude_closed:
+        # Candidate selection only, not dominance or entry authority. An
+        # unrelated definition is removable only when every finite selected
+        # route closes without this load. Unknown overrides any clean route.
+        reaching=[]
+        for row in candidates:
+            pending=[row[1]+4];seen=set();read=False;unknown=False
+            while pending:
+                pc=pending.pop()
+                if pc==load:
+                    read=True;continue
+                if pc in seen:continue
+                seen.add(pc);op=selected.get(pc)
+                if op is None:
+                    unknown=True;continue
+                if is_fatal_instruction(op) or op.group(CS_GRP_RET):continue
+                if (op.group(CS_GRP_CALL) or op.mnemonic in ('svc','hvc','smc') or
+                        'x'+str(register) in _native_table_writes(op)):
+                    unknown=True;continue
+                successors=successor_edges[pc]
+                if not successors:
+                    unknown=True;continue # An unresolved transfer is no exit.
+                pending.extend(successors)
+            if unknown:return None
+            if read:reaching.append(row)
+        if not reaching or len({row[2] for row in reaching})!=1:return None
+        return sorted(set(reaching))
     definitions={}
     for row in candidates:definitions.setdefault(row[1],[]).append(row)
     pending=list(predecessors.get(load,()));seen=set();reaching=[]
@@ -2026,8 +2054,7 @@ def _reaching_table_candidates(load, register, current_branch, by_pc, candidates
         seen.add(pc);op=selected[pc]
         if pc in definitions:
             reaching.extend(definitions[pc]);continue
-        writes=set() if op.mnemonic in ('cmp','cmn','tst','ccmp','ccmn') else {
-            op.reg_name(r).replace('w','x',1) for r in op.regs_access()[1]}
+        writes=_native_table_writes(op)
         if ('x'+str(register) in writes or register<19 and
                 (op.group(CS_GRP_CALL) or op.mnemonic in ('svc','hvc','smc'))):
             return None
@@ -2064,7 +2091,7 @@ def _native_u16_boolean_index(load, target, loaded, table, index, by_pc):
                 boolean_source_offsets=pcs,boolean_native_sources=list(registers_),boolean_field_bits=[3,2,1,0])
 
 
-def native_signed32_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *, text_size=None, protected_ranges=()):
+def native_signed32_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *, text_size=None, protected_ranges=(), known_tables=()):
     """Finite signed byte offsets retain their original native LDRSW/ADD/BR.
 
     Source constants and bounds are candidates only. The existing leaf load
@@ -2194,6 +2221,14 @@ def native_signed32_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
             if (terminal(op) or op.update_flags or has18(op) or
                     _native_table_writes(op)&{'x'+str(register),'sp','x29','x30','nzcv'}):break
     if local:candidates=local
+    elif candidates and len({row[3] for row in candidates})>1:
+        # Project the actual ADD/copy definition into the existing bounded
+        # selected-CFG proof. No nearest-address or current-table edge guess.
+        definitions=[(row[0],row[2] if row[2] is not None else row[1],row[3]) for row in candidates]
+        reaching=_reaching_table_candidates(load,table_register,branch,by_pc,definitions,known_tables,exclude_closed=True)
+        if reaching:
+            candidates=[row for row in candidates
+                        if (row[0],row[2] if row[2] is not None else row[1],row[3]) in reaching]
     if not candidates or len({row[3] for row in candidates})!=1:return None
     page,table_add,table_copy,table=candidates[-1]
     if any(a<table+size and table<b for a,b in protected_ranges):return None
@@ -2752,7 +2787,7 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
 
 
 def readonly_guest_table(ins, by_pc, entries, raw, readonly_ranges, *, known_tables=(), root_entries=None, text_size=None, protected_ranges=()):
-    return (native_signed32_readonly_table(ins,by_pc,entries,raw,readonly_ranges,text_size=text_size,protected_ranges=protected_ranges) or
+    return (native_signed32_readonly_table(ins,by_pc,entries,raw,readonly_ranges,text_size=text_size,protected_ranges=protected_ranges,known_tables=known_tables) or
             readonly_guest_byte_table(ins,by_pc,entries,raw,readonly_ranges) or
             runtime_readonly_guest_halfword_table(ins,by_pc,entries,raw,readonly_ranges) or
             runtime_readonly_guest_byte_table(ins,by_pc,entries,raw,readonly_ranges) or
