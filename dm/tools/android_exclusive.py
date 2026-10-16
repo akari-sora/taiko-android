@@ -277,6 +277,36 @@ def native_compare_retry(start, by_pc, kinds, api):
     return entry
 
 
+def native_rotated_lock(start, by_pc, kinds, api):
+    """A native try-lock puts its store before the exclusive-load entry.
+
+    Failed STXR falls through to a new reservation; a busy load clears that
+    reservation before leaving. No code may enter the store/status test first.
+    """
+    entry=start.address-8
+    if entry<0:return None
+    nodes=tuple(by_pc.get(entry+offset) for offset in range(0,20,4))
+    if any(op is None for op in nodes) or nodes[1].mnemonic!='cbz':return None
+    values=tuple(struct.unpack('<I',op.bytes)[0] for op in nodes)
+    data,base,status=values[0]&31,values[0]>>5&31,values[0]>>16&31
+    load=values[2]&0xFFFFFC00;exit_target=nodes[1].operands[-1].imm
+    if (load not in (0x885F7C00,0x885FFC00) or entry<=exit_target<entry+20 or
+            exit_target not in by_pc or entry+20 not in by_pc):
+        return None
+    words=(0x88007C00|status<<16|base<<5|data,
+           0x34000000|(((exit_target-entry-4)//4)&0x7FFFF)<<5|status,
+           load|base<<5|status,0x34FFFFA0|status,0xD5033F5F)
+    if values!=words:return None
+    if len({base,status,data})!=3 or any(reg in {18,29,30,31} for reg in (base,status,data)):
+        raise api.RewriteError(f'0x{entry:x}: unsupported registers in native rotated lock')
+    if any(kinds[op.address] is not None for op in nodes):
+        raise api.RewriteError(f'0x{entry:x}: source rewrite in native rotated lock')
+    for op in nodes:
+        validate_memory_operands(op,api)
+        if op.mnemonic in api.EXCLUSIVE_LOADS|api.EXCLUSIVE_STORES:validate_exclusive(op,api)
+    return entry
+
+
 NATIVE_CONDITIONAL_WORDS = (
     (0x885FFD0A, 0x6B09015F, 0x54000100, 0x7100055F,
      0xD5033F5F, 0x2A0A03E9, 0x540006EB, 0x885FFD0A,
@@ -297,6 +327,18 @@ NATIVE_CONDITIONAL_WORDS = (
     (0xD5033F5F, 0x88DFFF28, 0x7100051F, 0x54001388,
      0x885FFF29, 0x6B08013F, 0x54FFFF41, 0x91000508,
      0x8809FF28, 0x35FFFF09),
+    (0xF9400FA8, 0x885FFD08, 0x350000C8, 0xF9400FAA,
+     0x52800029, 0x880B7D49, 0x35FFFF4B, 0x14000003,
+     0x2A1F03E9, 0xD5033F5F),
+    (0xF9400FA8, 0x885F7D08, 0x350000C8, 0xF9400FAA,
+     0x52800029, 0x880B7D49, 0x35FFFF4B, 0x14000003,
+     0x2A1F03E9, 0xD5033F5F),
+    (0xF9400FA8, 0x885F7D08, 0x7100051F, 0x540000C1,
+     0xF9400FA9, 0x5280004A, 0x880B7D2A, 0x35FFFF2B,
+     0x14000002, 0xD5033F5F),
+    (0xF9400FA8, 0x885F7D08, 0x350000C8, 0xF9400FA8,
+     0x52800029, 0x880A7D09, 0x35FFFF4A, 0x1400000B,
+     0xD5033F5F),
 )
 NATIVE_CONDITIONAL_FIELDS = (
     ((0,5),(5,16),(),(5,),(),(0,16),(),(0,5),(5,16),(),
@@ -308,6 +350,10 @@ NATIVE_CONDITIONAL_FIELDS = (
     ((0,5),(0,),(),(0,),(0,),(0,5),(0,),(0,5,16),(0,),()),
     ((),(0,16),(0,5),(0,),(0,5),(0,5),(5,16),(),(0,5,16),(0,16),(0,)),
     ((),(0,5),(5,),(),(0,5),(5,16),(),(0,5),(0,5,16),(0,)),
+    ((0,),(0,5),(0,),(0,),(0,),(0,5,16),(0,),(),(0,),()),
+    ((0,),(0,5),(0,),(0,),(0,),(0,5,16),(0,),(),(0,),()),
+    ((0,),(0,5),(5,),(),(0,),(0,),(0,5,16),(0,),(),()),
+    ((0,),(0,5),(0,),(0,),(0,),(0,5,16),(0,),(),()),
 )
 
 
@@ -317,21 +363,23 @@ def native_conditional_refresh(start, by_pc, kinds, api):
     These observed schedules share a native refresh body across reservations.
     Registers are consistently renamed injectively, including intentionally
     reused expected/status roles; WZR and every ordering/condition bit stay fixed.
+    FP-cell rows leave fixed X29/#24 outside the rename fields and retain
+    both actual slot reads. Their closed-monitor joins stay outside the union.
     No instruction is emitted, patched, or allowed across a host call.
     """
     for variant, (words, fields) in enumerate(zip(NATIVE_CONDITIONAL_WORDS,
                                                 NATIVE_CONDITIONAL_FIELDS)):
-        begin = start.address - (0,0,20,0,20,16)[variant]
+        begin = start.address - (0,0,20,0,20,16,4,4,4,4)[variant]
         block = tuple(by_pc.get(begin + i*4) for i in range(len(words)))
         if begin < 0 or any(ins is None for ins in block):
             continue
-        external = ((6,),(5,),(2,4),(4,9),(3,),(3,))[variant]
+        external = ((6,),(5,),(2,4),(4,9),(3,),(3,),(),(),(),(7,))[variant]
         roles, reverse, matched = {}, {}, True
         for index, (ins, expected, shifts) in enumerate(zip(block, words, fields)):
             value = struct.unpack('<I', ins.bytes)[0]
             mask = sum(31 << shift for shift in shifts)
             if index in external:
-                mask |= 0x3FFFFFF if variant == 3 and index == 9 else 0x7FFFF << 5
+                mask |= 0x3FFFFFF if (variant,index) in ((3,9),(9,7)) else 0x7FFFF << 5
             if value & ~mask != expected & ~mask:
                 matched = False
                 break
@@ -362,8 +410,8 @@ def native_conditional_refresh(start, by_pc, kinds, api):
             validate_memory_operands(ins,api)
             if ins.mnemonic in api.EXCLUSIVE_LOADS | api.EXCLUSIVE_STORES:
                 validate_exclusive(ins,api)
-        entry = begin + (0,0,12,0,16,4)[variant]
-        heads = {begin+offset for offset in ((0,28),(0,28),(20,),(0,20),(20,),(16,))[variant]}
+        entry = begin + (0,0,12,0,16,4,0,0,0,0)[variant]
+        heads = {begin+offset for offset in ((0,28),(0,28),(20,),(0,20),(20,),(16,),(4,),(4,),(4,),(4,))[variant]}
         return nodes,entry,heads
     return None
 
@@ -381,6 +429,14 @@ def plan_regions(instructions, kinds, entry_offsets, api):
             if occupied&nodes:
                 raise api.RewriteError(f'0x{native_entry:x}: overlapping exclusive windows')
             require_single_entry(nodes,native_entry,instructions,entry_offsets,api)
+            occupied.update(nodes)
+            continue
+        native_start=native_rotated_lock(start,by_pc,kinds,api)
+        if native_start is not None:
+            nodes=set(range(native_start,native_start+20,4))
+            if occupied&nodes:
+                raise api.RewriteError(f'0x{native_start:x}: overlapping exclusive windows')
+            require_single_entry(nodes,start.address,instructions,entry_offsets,api)
             occupied.update(nodes)
             continue
         conditional=native_conditional_refresh(start,by_pc,kinds,api)
