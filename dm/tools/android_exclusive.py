@@ -345,6 +345,10 @@ NATIVE_CONDITIONAL_WORDS = (
     (0xD5033F5F, 0x9100054A, 0x91004129, 0xEB0A017F,
      0x540000C0, 0x885F7D2D, 0x35FFFF4D, 0x880D7D2C,
      0x35FFFF2D, 0x14000027),
+    (0x885F7F09, 0x6B0A013F, 0x540000E1, 0x1100054A,
+     0x880B7F0A, 0x350000AB, 0x5280002A, 0x360000AA,
+     0x14000008, 0xD5033F5F, 0x2A1F03EA, 0x370000AA,
+     0x7100053F, 0x2A0903EA, 0x54FFFE4A, 0x1400003F),
 )
 NATIVE_CONDITIONAL_FIELDS = (
     ((0,5),(5,16),(),(5,),(),(0,16),(),(0,5),(5,16),(),
@@ -362,6 +366,8 @@ NATIVE_CONDITIONAL_FIELDS = (
     ((0,),(0,5),(0,),(0,),(0,),(0,5,16),(0,),(),()),
     ((),(0,5),(0,5),(5,),(),(0,5),(0,),(0,5,16),(0,),()),
     ((),(0,5),(0,5),(5,16),(),(0,5),(0,),(0,5,16),(0,),()),
+    ((0,5),(5,16),(),(0,5),(0,5,16),(0,),(0,),(0,),(),(),
+     (0,),(0,),(5,),(0,16),(),()),
 )
 
 
@@ -377,17 +383,17 @@ def native_conditional_refresh(start, by_pc, kinds, api):
     """
     for variant, (words, fields) in enumerate(zip(NATIVE_CONDITIONAL_WORDS,
                                                 NATIVE_CONDITIONAL_FIELDS)):
-        begin = start.address - (0,0,20,0,20,16,4,4,4,4,20,20)[variant]
+        begin = start.address - (0,0,20,0,20,16,4,4,4,4,20,20,0)[variant]
         block = tuple(by_pc.get(begin + i*4) for i in range(len(words)))
         if begin < 0 or any(ins is None for ins in block):
             continue
-        external = ((6,),(5,),(2,4),(4,9),(3,),(3,),(),(),(),(7,),(4,9),(4,9))[variant]
+        external = ((6,),(5,),(2,4),(4,9),(3,),(3,),(),(),(),(7,),(4,9),(4,9),(15,))[variant]
         roles, reverse, matched = {}, {}, True
         for index, (ins, expected, shifts) in enumerate(zip(block, words, fields)):
             value = struct.unpack('<I', ins.bytes)[0]
             mask = sum(31 << shift for shift in shifts)
             if index in external:
-                mask |= 0x3FFFFFF if (variant,index) in ((3,9),(9,7),(10,9),(11,9)) else 0x7FFFF << 5
+                mask |= 0x3FFFFFF if (variant,index) in ((3,9),(9,7),(10,9),(11,9),(12,15)) else 0x7FFFF << 5
             if value & ~mask != expected & ~mask:
                 matched = False
                 break
@@ -418,8 +424,8 @@ def native_conditional_refresh(start, by_pc, kinds, api):
             validate_memory_operands(ins,api)
             if ins.mnemonic in api.EXCLUSIVE_LOADS | api.EXCLUSIVE_STORES:
                 validate_exclusive(ins,api)
-        entry = begin + (0,0,12,0,16,4,0,0,0,0,20,20)[variant]
-        heads = {begin+offset for offset in ((0,28),(0,28),(20,),(0,20),(20,),(16,),(4,),(4,),(4,),(4,),(20,),(20,))[variant]}
+        entry = begin + (0,0,12,0,16,4,0,0,0,0,20,20,0)[variant]
+        heads = {begin+offset for offset in ((0,28),(0,28),(20,),(0,20),(20,),(16,),(4,),(4,),(4,),(4,),(20,),(20,),(0,))[variant]}
         return nodes,entry,heads
     return None
 
@@ -461,6 +467,44 @@ def native_closed_call_tail(start, body, terminals, by_pc, kinds, api):
 
 
 
+def native_shared_clear(start, by_pc, kinds, api):
+    """Two source-exact fresh heads share one CLREX and acquire reload.
+
+    The first consumes state 2 with a zero store; the second publishes its
+    independent payload only from state zero. Mismatch paths retire before
+    LDAR and either leave for ordinary classification or retry the second
+    fresh load. Return the existing shared-head contract, never callback
+    authority or a relaxation for arbitrary exclusive-window entrances.
+    """
+    begin=start.address
+    block=tuple(by_pc.get(begin+offset) for offset in range(0,60,4))
+    if any(ins is None for ins in block):return None
+    values=tuple(struct.unpack('<I',ins.bytes)[0] for ins in block)
+    loaded,base,payload=values[0]&31,values[0]>>5&31,values[8]&31
+    expected=(0x885FFC00|base<<5|loaded,0x7100081F|loaded<<5,0x54000121,
+              0x8800FC1F|loaded<<16|base<<5,0x35FFFF80|loaded,values[5],
+              0x885FFC00|base<<5|loaded,0x35000080|loaded,
+              0x8800FC00|loaded<<16|base<<5|payload,0x35FFFFA0|loaded,
+              values[10],0xD5033F5F,0x88DFFC00|base<<5|loaded,
+              values[13],0x17FFFFF8)
+    if (values!=expected or values[5]&0xFC000000!=0x14000000 or
+            values[10]&0xFC000000!=0x14000000 or
+            values[13]&0xFF00001F!=(0x35000000|loaded)):return None
+    roles=(base,loaded,payload)
+    if len(set(roles))!=3 or any(role in {18,29,30,31} for role in roles):return None
+    nodes={ins.address for ins in block}
+    success,wait,classify=(block[index].operands[-1].imm for index in (5,10,13))
+    if not wait<classify<begin<begin+60<success:return None
+    if any(target not in by_pc or api.is_fatal_instruction(by_pc[target])
+           for target in (success,wait,classify)):return None
+    if any(kinds.get(pc,'missing') is not None for pc in nodes):
+        raise api.RewriteError(f'0x{begin:x}: source rewrite in native shared clear')
+    for ins in block:
+        validate_memory_operands(ins,api)
+        if ins.mnemonic in api.EXCLUSIVE_LOADS|api.EXCLUSIVE_STORES:validate_exclusive(ins,api)
+    return nodes,{begin,begin+24}
+
+
 def plan_regions(instructions, kinds, entry_offsets, api):
     by_pc = {ins.address: ins for ins in instructions}
     regions, occupied, consumed = [], set(), set()
@@ -482,6 +526,18 @@ def plan_regions(instructions, kinds, entry_offsets, api):
                 raise api.RewriteError(f'0x{native_start:x}: overlapping exclusive windows')
             require_single_entry(nodes,start.address,instructions,entry_offsets,api)
             occupied.update(nodes)
+            continue
+        shared=native_shared_clear(start,by_pc,kinds,api)
+        if shared is not None:
+            nodes,heads=shared
+            if occupied&nodes:
+                raise api.RewriteError(f'0x{start.address:x}: overlapping exclusive windows')
+            if (set(entry_offsets)&nodes)-{min(heads)}:
+                raise api.RewriteError(f'0x{start.address:x}: external entry in exclusive region interior')
+            for ins in instructions:
+                if ins.address not in nodes and any(target in nodes-heads for target in successors(ins)):
+                    raise api.RewriteError(f'0x{ins.address:x}: external entry into exclusive region interior')
+            occupied.update(nodes);consumed.update(heads)
             continue
         conditional=native_conditional_refresh(start,by_pc,kinds,api)
         if conditional is not None:
