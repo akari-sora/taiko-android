@@ -191,10 +191,14 @@ class ForestAuditTests(unittest.TestCase):
         nso = SimpleNamespace(source_sha256=bytes.fromhex(audit.MAIN_SHA256),
                               build_id=bytes.fromhex(audit.MAIN_BUILD_ID), image=bytes(original))
         ranges = [(0, 4)] + [(target, target + 4) for target in targets]
-        descriptor = dict(offset=0, source_word=0xD63F0240, rule=audit.RULE,
+        import hashlib
+        pin=dict(offset=0,source_word=0xD63F0240,caller_eh_start=0x1000,caller_eh_end=0x1004,
+                 caller_fde=0x1008,caller_cie=32,caller_body_sha256=hashlib.sha256(original[0x1000:0x1004]).hexdigest(),
+                 evidence_start=0,evidence_end=4,evidence_sha256=hashlib.sha256(original[:4]).hexdigest(),source_role='authored-only')
+        descriptor = dict(callers=[pin], rule=audit.RULE,
                           source_sha256=audit.MAIN_SHA256, build_id=audit.MAIN_BUILD_ID,
                           target_count=3, target_sha256=audit.target_digest(targets),
-                          caller_eh_start=0x1000, caller_eh_end=0x1004, target_policy=audit.POLICY)
+                          target_policy=audit.POLICY)
         discovery = dict(roots=[0, *targets], versioned_checked_call_forests=[descriptor])
         rewrite = dict(checked_call_forests=[forest])
         metadata = object()
@@ -203,6 +207,7 @@ class ForestAuditTests(unittest.TestCase):
         stack = ExitStack()
         self.addCleanup(stack.close)
         stack.enter_context(patch.multiple(audit, CALL=0, CALLER_START=0x1000, CALLER_END=0x1004))
+        stack.enter_context(patch.object(audit,'CALLER_PINS',(pin,)))
         stack.enter_context(patch.dict(sys.modules, {'nso_eh': SimpleNamespace(validated_eh_functions=eh)}))
         stack.enter_context(patch.object(android_import, 'discover_code', cfg))
         args = [nso, metadata, image, discovery, rewrite,
@@ -224,7 +229,7 @@ class ForestAuditTests(unittest.TestCase):
             if mutation == 'range-gap': candidate[6] = [(0, 4), (0x1000, 0x1004)]
             elif mutation == 'forged-roots': candidate[3]['roots'].remove(0x2000)
             elif mutation == 'target-hash': candidate[3]['versioned_checked_call_forests'][0]['target_sha256'] = '0' * 64
-            elif mutation == 'caller-extent': candidate[3]['versioned_checked_call_forests'][0]['caller_eh_end'] += 4
+            elif mutation == 'caller-extent': candidate[3]['versioned_checked_call_forests'][0]['callers'][0]['caller_eh_end'] += 4
             elif mutation == 'extra-forest': candidate[4]['checked_call_forests'].append(candidate[4]['checked_call_forests'][0])
             elif mutation == 'source-gate': candidate[8] = [dict(original_offset=0)]
             elif mutation == 'no-site': candidate[5] = []

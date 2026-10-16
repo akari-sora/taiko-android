@@ -3,6 +3,7 @@
 This module never accepts a caller-supplied target list or grants generic EH/RX
 membership. An unmatched input retains the ordinary strict import policy.
 """
+import hashlib
 import struct
 
 MAIN_SHA256 = 'f1313fe0d6cd4a024e53d8a283434448bacea453b02f37b75b18bfe281d0fcff'
@@ -28,6 +29,22 @@ FOREST_WORD_CHECKS = (
     (0x2927004, (0xF9400F11, 0xF9406231, 0xF9401A32, 0xF9400252,
                  0xA90427E8, 0xB90053EA, 0xA90233EB, 0xA90337EE,
                  0xA9013FF0, 0xF9401A22, 0xD63F0240)),
+)
+FOREST_CALLER_PINS = (
+    dict(offset=0x84D7C0, source_word=0xD63F0240,
+         caller_eh_start=0x84A890, caller_eh_end=0x852A78, caller_fde=0x474B0B0, caller_cie=0x41D6360,
+         caller_body_sha256='8effd40fb6cd794194374b5ffade796e12b2a0ecae234fbcbc37bb6066fc1885',
+         evidence_start=0x84D764, evidence_end=0x84D7C8,
+         evidence_sha256='10a460b5d1c6f6c28e650c3800fd4ed20086ec723b81b112151583eef33dfde8',
+         source_role='mutable-ctx-150-receiver-vptr-slot-196; runtime-domain-only; initialization/type/cross-module-unproven',
+         stack_argument_bytes=0x50, stack_argument_store_count=10,
+         stack_store_start=0x84D798, stack_store_end=0x84D7C0),
+    dict(offset=FOREST_CALL_OFFSET, source_word=0xD63F0240,
+         caller_eh_start=0x2926E60, caller_eh_end=0x2927164, caller_fde=0x4572CC0, caller_cie=0x41D6360,
+         caller_body_sha256='5eeec23468d866136914f6a940793ab6f6455408b8c75c8383bb8f17489ba5ce',
+         evidence_start=0x2927004, evidence_end=0x2927030,
+         evidence_sha256='6ce44c15553014a6affd4c9faf6f0a656ac60a5fada7d92f817acd51f4d4f678',
+         source_role='mutable-generated-function-pointer; runtime-domain-only'),
 )
 
 
@@ -66,7 +83,7 @@ def select_checked_calls(nso, metadata):
 
 
 def select_checked_call_forest(nso, metadata):
-    """Only this pinned generated callback may use the validated EH entry set.
+    """Only these pinned callers may use the same validated EH entry set.
 
     This source reads a mutable generated function pointer through X17/X18;
     it is not a constant or a read-only switch. Every admitted target is an
@@ -89,11 +106,23 @@ def select_checked_call_forest(nso, metadata):
     if (not targets or any(type(pc) is not int or pc <= 0 or pc % 4 or pc >= nso.sections[0].end for pc in targets)
             or any(a >= b for a, b in zip(targets, targets[1:]))):
         raise ValueError('pinned Taiko call forest: invalid sorted EH entry set')
-    if not any(record.start == 0x2926E60 and record.end == 0x2927164 for record in records):
-        raise ValueError('pinned Taiko call forest: caller FDE range changed')
-    return dict(offset=FOREST_CALL_OFFSET, source_word=0xD63F0240,
-                rule='versioned-taiko-main-eh-callback-forest-v1',
+    callers=[]
+    for pin in FOREST_CALLER_PINS:
+        start,end=pin['caller_eh_start'],pin['caller_eh_end']
+        if not any((record.start,record.end,record.fde,record.cie)==
+                   (start,end,pin['caller_fde'],pin['caller_cie']) for record in records):
+            raise ValueError('pinned Taiko call forest: caller FDE range changed')
+        if (not nso.sections[0].offset<=start<=pin['evidence_start']<=pin['offset']<pin['evidence_end']<=end<=nso.sections[0].end or
+                hashlib.sha256(nso.image[start:end]).hexdigest()!=pin['caller_body_sha256'] or
+                hashlib.sha256(nso.image[pin['evidence_start']:pin['evidence_end']]).hexdigest()!=pin['evidence_sha256'] or
+                nso.image[pin['offset']:pin['offset']+4]!=struct.pack('<I',pin['source_word'])):
+            raise ValueError('pinned Taiko call forest: caller body/evidence changed')
+        descriptor=dict(pin)
+        if 'stack_store_start' in pin:
+            descriptor['stack_store_sha256']=hashlib.sha256(nso.image[pin['stack_store_start']:pin['stack_store_end']]).hexdigest()
+        callers.append(descriptor)
+    return dict(callers=callers,
+                rule='versioned-taiko-main-eh-callback-forest-v2',
                 source_sha256=MAIN_SHA256, build_id=MAIN_BUILD_ID,
                 targets=targets, target_count=len(targets), target_sha256=eh_target_set_sha256(records),
-                caller_eh_start=0x2926E60, caller_eh_end=0x2927164,
                 target_policy='runtime-exact-positive-indexed-EH-entry; zero-range/unindexed/unknown/interior/null/cross-module trap')

@@ -333,7 +333,7 @@ again by the independent rewrite stage.
         raise ImportError(str(error)) from error
     checked_calls = {item['offset']: item['target'] for item in versioned_checked_calls}
     forest_targets = forest_contract['targets'] if forest_contract is not None else ()
-    forest_site = forest_contract['offset'] if forest_contract is not None else None
+    forest_sites = {caller['offset'] for caller in forest_contract['callers']} if forest_contract is not None else set()
     roots = {entry, *metadata.eh_starts, *metadata.init_addresses, *checked_calls.values(), *forest_targets}
     extents = []
     for symbol in metadata.symbols:
@@ -631,7 +631,7 @@ again by the independent rewrite stage.
         guarded_sites.clear()
         proven_sites.clear()
         for ins in sorted(indirect,key=lambda op:op.address):
-            if ins.address == forest_site:
+            if ins.address in forest_sites:
                 if struct.unpack('<I', ins.bytes)[0] != 0xD63F0240:
                     raise ImportError('versioned call forest lacks exact original BLR X18')
                 proven_sites.add(ins.address)
@@ -794,7 +794,7 @@ again by the independent rewrite stage.
             raise ImportError('versioned checked call was not selected by the original CFG')
         report['versioned_checked_calls'] = list(versioned_checked_calls)
     if forest_contract is not None:
-        if forest_site not in instructions or any(target not in instructions for target in forest_targets):
+        if not forest_sites <= instructions.keys() or any(target not in instructions for target in forest_targets):
             raise ImportError('versioned call forest source/target lacks original CFG audit')
         report['versioned_checked_call_forests'] = [{key: value for key, value in forest_contract.items() if key != 'targets'}]
     if profiler_bank is not None:
@@ -938,7 +938,7 @@ def import_module(source, name, *, package_version=1, profile=None, indirect_pol
                     proven_guest_indirect_offsets=code_report.get('proven_guest_indirect_sites',()),
                     checked_call_targets={item['offset']: item['target']
                                           for item in code_report.get('versioned_checked_calls', ())},
-                    checked_call_forest_offsets=(forest_contract['offset'],) if forest_contract else (),
+                    checked_call_forest_offsets=tuple(caller['offset'] for caller in forest_contract['callers']) if forest_contract else (),
                     checked_call_forest_targets=forest_contract['targets'] if forest_contract else ())
     package = make_package(name, nso, metadata, image, patch_offset, package_version)
     report = {'name': name, 'source_sha256': nso.source_sha256.hex(), 'build_id': nso.build_id.hex(),

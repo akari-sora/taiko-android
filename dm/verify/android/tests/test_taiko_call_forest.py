@@ -153,17 +153,28 @@ class CallForestTests(unittest.TestCase):
         nso.image.update({0x2927004 + index: value for index, value in enumerate(fixed.raw(*chain))})
         records = tuple(SimpleNamespace(start=start, end=end, fde=0x4000 + index * 32, cie=0x3000)
                         for index, (start, end) in enumerate(((0x100, 0x140), (0xDB9050, 0xDB9100),
-                                                             (0x2926E60, 0x2927164))))
-        digest = hashlib.sha256(struct.pack('<3Q', *(record.start for record in records))).hexdigest()
+                                                             (0x84A890,0x852A78),(0x2926E60, 0x2927164))))
+        records=tuple(sorted(records,key=lambda record:record.start))
+        # Isolated source-pin fixture: production pins must reject these bytes.
+        for offset in (0x84D7C0,):
+            nso.image.update({offset+index:value for index,value in enumerate(fixed.raw(0xD63F0240))})
+        pins=[]
+        for original in contract.FOREST_CALLER_PINS:
+            pin=dict(original);record=next(r for r in records if r.start==pin['caller_eh_start'])
+            pin.update(caller_fde=record.fde,caller_cie=record.cie,
+                       caller_body_sha256=hashlib.sha256(nso.image[record.start:record.end]).hexdigest(),
+                       evidence_sha256=hashlib.sha256(nso.image[pin['evidence_start']:pin['evidence_end']]).hexdigest())
+            pins.append(pin)
+        digest = hashlib.sha256(struct.pack('<4Q', *(record.start for record in records))).hexdigest()
         parser = SimpleNamespace(validated_eh_functions=lambda n, m: records,
                                  eh_target_set_sha256=lambda r: digest)
-        with patch.dict(sys.modules, {'nso_eh': parser}):
+        with patch.dict(sys.modules, {'nso_eh': parser}),patch.object(contract,'FOREST_CALLER_PINS',tuple(pins)):
             selected = contract.select_checked_call_forest(nso, metadata)
             self.assertEqual(tuple(record.start for record in records), selected['targets'])
             self.assertEqual(digest, selected['target_sha256'])
-            self.assertEqual(0x292702C, selected['offset'])
+            self.assertEqual([0x84D7C0,0x292702C],[caller['offset'] for caller in selected['callers']])
             import taiko_forest_audit as independent_audit
-            self.assertEqual((selected['caller_eh_start'], selected['caller_eh_end'], selected['target_policy']),
+            self.assertEqual((selected['callers'][1]['caller_eh_start'], selected['callers'][1]['caller_eh_end'], selected['target_policy']),
                              (independent_audit.CALLER_START, independent_audit.CALLER_END,
                               independent_audit.POLICY))
             # This EH entry has no relocation-backed function-pointer intersection.
@@ -185,10 +196,10 @@ class CallForestTests(unittest.TestCase):
         metadata = parse_metadata(parse_nso(source))
         main = next(symbol for symbol in metadata.symbols if symbol.name == 'fixture_main')
         entry = main.value
-        replacement = [0xD63F0240, 0xD65F03C0] + [0xD503201F] * (main.size // 4 - 2)
+        replacement = [0xD63F0240,0xD63F0240,0xD65F03C0] + [0xD503201F] * (main.size // 4 - 3)
         write_image(source, entry, '<' + 'I' * len(replacement), *replacement)
         write_image(source, 0x500, '<I', 0xD65F03C0)
-        selected = dict(offset=entry, source_word=0xD63F0240, targets=(0x500,), target_count=1,
+        selected = dict(callers=[dict(offset=pc,source_word=0xD63F0240) for pc in (entry,entry+4)], targets=(0x500,), target_count=1,
                         target_sha256=hashlib.sha256(struct.pack('<Q', 0x500)).hexdigest(),
                         rule='self-authored-test-selector')
         # Only the internal trusted selector is substituted; import exposes no target-list argument.
@@ -202,6 +213,7 @@ class CallForestTests(unittest.TestCase):
         self.assertNotIn('targets', receipt)
         self.assertEqual(1, receipt['target_count'])
         self.assertEqual(1, report['rewrite']['checked_call_forests'][0]['node_count'])
+        self.assertEqual([entry,entry+4],report['rewrite']['checked_call_forests'][0]['site_offsets'])
         self.assertNotIn(entry, report['code_discovery']['guarded_indirect_sites'])
 
 

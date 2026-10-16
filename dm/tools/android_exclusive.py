@@ -339,6 +339,12 @@ NATIVE_CONDITIONAL_WORDS = (
     (0xF9400FA8, 0x885F7D08, 0x350000C8, 0xF9400FA8,
      0x52800029, 0x880A7D09, 0x35FFFF4A, 0x1400000B,
      0xD5033F5F),
+    (0xD5033F5F, 0x9100054A, 0x91004129, 0xF104015F,
+     0x540000C0, 0x885F7D2C, 0x35FFFF4C, 0x880C7D2B,
+     0x35FFFF2C, 0x14000036),
+    (0xD5033F5F, 0x9100054A, 0x91004129, 0xEB0A017F,
+     0x540000C0, 0x885F7D2D, 0x35FFFF4D, 0x880D7D2C,
+     0x35FFFF2D, 0x14000027),
 )
 NATIVE_CONDITIONAL_FIELDS = (
     ((0,5),(5,16),(),(5,),(),(0,16),(),(0,5),(5,16),(),
@@ -354,6 +360,8 @@ NATIVE_CONDITIONAL_FIELDS = (
     ((0,),(0,5),(0,),(0,),(0,),(0,5,16),(0,),(),(0,),()),
     ((0,),(0,5),(5,),(),(0,),(0,),(0,5,16),(0,),(),()),
     ((0,),(0,5),(0,),(0,),(0,),(0,5,16),(0,),(),()),
+    ((),(0,5),(0,5),(5,),(),(0,5),(0,),(0,5,16),(0,),()),
+    ((),(0,5),(0,5),(5,16),(),(0,5),(0,),(0,5,16),(0,),()),
 )
 
 
@@ -369,17 +377,17 @@ def native_conditional_refresh(start, by_pc, kinds, api):
     """
     for variant, (words, fields) in enumerate(zip(NATIVE_CONDITIONAL_WORDS,
                                                 NATIVE_CONDITIONAL_FIELDS)):
-        begin = start.address - (0,0,20,0,20,16,4,4,4,4)[variant]
+        begin = start.address - (0,0,20,0,20,16,4,4,4,4,20,20)[variant]
         block = tuple(by_pc.get(begin + i*4) for i in range(len(words)))
         if begin < 0 or any(ins is None for ins in block):
             continue
-        external = ((6,),(5,),(2,4),(4,9),(3,),(3,),(),(),(),(7,))[variant]
+        external = ((6,),(5,),(2,4),(4,9),(3,),(3,),(),(),(),(7,),(4,9),(4,9))[variant]
         roles, reverse, matched = {}, {}, True
         for index, (ins, expected, shifts) in enumerate(zip(block, words, fields)):
             value = struct.unpack('<I', ins.bytes)[0]
             mask = sum(31 << shift for shift in shifts)
             if index in external:
-                mask |= 0x3FFFFFF if (variant,index) in ((3,9),(9,7)) else 0x7FFFF << 5
+                mask |= 0x3FFFFFF if (variant,index) in ((3,9),(9,7),(10,9),(11,9)) else 0x7FFFF << 5
             if value & ~mask != expected & ~mask:
                 matched = False
                 break
@@ -410,9 +418,45 @@ def native_conditional_refresh(start, by_pc, kinds, api):
             validate_memory_operands(ins,api)
             if ins.mnemonic in api.EXCLUSIVE_LOADS | api.EXCLUSIVE_STORES:
                 validate_exclusive(ins,api)
-        entry = begin + (0,0,12,0,16,4,0,0,0,0)[variant]
-        heads = {begin+offset for offset in ((0,28),(0,28),(20,),(0,20),(20,),(16,),(4,),(4,),(4,),(4,))[variant]}
+        entry = begin + (0,0,12,0,16,4,0,0,0,0,20,20)[variant]
+        heads = {begin+offset for offset in ((0,28),(0,28),(20,),(0,20),(20,),(16,),(4,),(4,),(4,),(4,),(20,),(20,))[variant]}
         return nodes,entry,heads
+    return None
+
+
+
+def native_closed_call_tail(start, body, terminals, by_pc, kinds, api):
+    """A native lock calls its slow path only after STORE or CLREX.
+
+    Validate the common argument prefix and its busy-path branch as a union.
+    The call itself stays outside: the reservation and any need for exclusive
+    relocation have both ended. Relocated X18 retry handling is unchanged.
+    """
+    stores=[pc for pc in terminals if by_pc[pc].mnemonic in api.EXCLUSIVE_STORES]
+    clears=[pc for pc in terminals if by_pc[pc].mnemonic=='clrex']
+    if len(stores)!=1 or len(clears)!=1 or any(kinds[pc] is not None for pc in body):return None
+    store=by_pc[stores[0]];test=by_pc.get(store.address+4);busy=by_pc.get(clears[0]+4)
+    status=struct.unpack('<I',store.bytes)[0]>>16&31;prefix=store.address+8
+    if (test is None or test.mnemonic!='cbz' or status==31 or test.reg_name(test.operands[0].reg)!=f'w{status}' or
+            busy is None or busy.mnemonic!='b' or busy.operands[-1].imm!=prefix or
+            test.address in body or busy.address in body):
+        return None
+    tail={test.address,busy.address}
+    if any(kinds[pc] is not None for pc in tail):return None
+    for pc in range(prefix,prefix+36,4):
+        op=by_pc.get(pc)
+        if op is None or pc in body or pc in tail:return None
+        if op.mnemonic=='bl':
+            target=op.operands[-1].imm
+            if (pc==prefix or test.operands[-1].imm!=pc+4 or pc+4 not in by_pc or
+                    target not in by_pc or target in body|tail|{pc}):
+                return None
+            return body|tail
+        if (kinds[pc] is not None or op.mnemonic not in TAIL_ARITHMETIC or
+                any(arg.type not in {ARM64_OP_REG,ARM64_OP_IMM} for arg in op.operands) or
+                any(op.reg_name(r) in {'sp','wsp'} for r in op.regs_access()[1])):
+            return None
+        tail.add(pc)
     return None
 
 
@@ -498,6 +542,13 @@ def plan_regions(instructions, kinds, entry_offsets, api):
                 raise api.RewriteError(f'0x{pc:x}: unbounded exclusive call/indirect control flow starting 0x{start.address:x}')
             pending.extend((target, False) for target in reversed(successors(ins)))
         body, retries, tails = set(colors), set(), set()
+        native_nodes=native_closed_call_tail(start,body,terminals,by_pc,kinds,api)
+        if native_nodes is not None:
+            if occupied&native_nodes:
+                raise api.RewriteError(f'0x{start.address:x}: overlapping exclusive windows')
+            require_single_entry(native_nodes,start.address,instructions,entry_offsets,api)
+            occupied.update(native_nodes)
+            continue
         for pc in terminals:
             if by_pc[pc].mnemonic not in api.EXCLUSIVE_STORES:
                 continue
