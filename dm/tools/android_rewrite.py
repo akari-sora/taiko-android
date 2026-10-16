@@ -6,6 +6,7 @@ while RW, then seals RX. This module never assumes a Bionic TLS layout.
 Bounded exclusive windows are relocated as complete single-entry regions.
 """
 import argparse
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from itertools import combinations
 import hashlib
@@ -125,6 +126,7 @@ class Image:
     indirect_policy: str = 'strict'
     package_version: int = 1
     checked_stack: bool = False
+    checked_calls: tuple = ()
 
     def metadata(self):
         result = {'target': self.target, 'abi': self.abi, 'size': len(self.bytes),
@@ -141,6 +143,9 @@ class Image:
                           gate_provenance=[asdict(x) for x in self.gate_provenance])
         if self.checked_stack:
             result.update(checked_stack=True, gate_provenance=[asdict(x) for x in self.gate_provenance])
+        if self.checked_calls:
+            result['checked_calls'] = [dict(offset=pc, target=target, rule='virtual-x18-exact-target-direct-call-v1')
+                                       for pc, target in self.checked_calls]
         return result
 
     def validate(self):
@@ -2067,6 +2072,48 @@ class Emitter:
         self.emit(0x910003FF | adjustment << 10)
         self.emit(branch(self.pc, target))
 
+    def checked_call(self, ins, target):
+        """Compare a virtual X18 snapshot, then direct-call one audited entry.
+
+        The mutable source field is not treated as a constant. Both exits restore
+        all guest arguments, flags and SP before transferring or trapping. X16
+        remains an argument; X30 alone receives the original BLR continuation.
+        """
+        scratch, state = self.begin(ins, frame=64)
+        third = next(r for r in range(16) if r not in registers(ins) | {scratch, state})
+        self.emit(memory(False, third, 31, 32))
+        self.emit(0xD53B4200 | third)  # MRS third,NZCV
+        self.emit(memory(False, third, 31, 40))
+        self.emit(memory(True, scratch, state, 0))  # Snapshot virtual X18.
+
+        def address(register, offset):
+            pages = (offset >> 12) - (self.pc >> 12)
+            if not -(1 << 20) <= pages < (1 << 20):
+                raise RewriteError('checked call address exceeds ADRP reach')
+            self.emit(0x90000000 | (pages & 3) << 29 | (pages >> 2 & 0x7FFFF) << 5 | register)
+            self.emit(0x91000000 | (offset & 4095) << 10 | register << 5 | register)
+
+        address(state, target)
+        self.emit(0xEB00001F | state << 16 | scratch << 5)  # CMP scratch,state
+        mismatch = self.pc
+        self.emit(0)
+
+        def restore():
+            self.emit(memory(True, third, 31, 40))
+            self.emit(0xD51B4200 | third)  # MSR NZCV,third
+            self.emit(memory(True, third, 31, 32))
+            self.emit(pair(True, scratch, state, 16))
+            self.emit(pair(True, 16, 30, 0))
+            self.emit(0x910103FF)  # ADD SP,SP,#64; preserves restored NZCV.
+
+        restore()
+        address(30, ins.address + 4)
+        self.emit(branch(self.pc, target))
+        failure = self.pc
+        restore()
+        self.emit(0xD4200000)  # Unknown, null and interior targets fail closed.
+        self.data[mismatch:mismatch + 4] = word(0x54000001 | ((failure - mismatch) // 4 & 0x7FFFF) << 5)
+
     def byte_jump(self, ins, plan):
         # Preserve every guest GPR, SP, LR and NZCV. The state accessor also
         # preserves SIMD/FP state and hardware x18. No guest register is dead
@@ -2402,7 +2449,7 @@ class Emitter:
 
 def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offset=None, entry_offsets=None, profile=None,
             indirect_policy='strict', package_version=1, guarded_indirect_offsets=(), checked_stack=False,
-            readonly_ranges=(), proven_guest_indirect_offsets=()):
+            readonly_ranges=(), proven_guest_indirect_offsets=(), checked_call_targets=None):
     """Rewrite selected ARM64 code while preserving all other raw image bytes.
 
     Ranges are image-relative, half-open (start, end) pairs within text_size.
@@ -2421,6 +2468,9 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
     this fact as well as its independently checked source guard and table.
     proven_guest_indirect_offsets names native-GPR RO switches; they retain
     the original BR after the same proof and are never host dispatch gates.
+    checked_call_targets is an internal raw-fixture API for exact virtual-X18
+    calls to independently selected entry roots. NSO import chooses only its
+    compiled versioned contract; the CLI exposes no caller-supplied mapping.
     """
     if indirect_policy not in ('strict', 'guarded-host'):
         raise RewriteError('unsupported indirect policy')
@@ -2429,7 +2479,16 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
     if not isinstance(checked_stack, bool) or (checked_stack and package_version != 2):
         raise RewriteError('checked stack requires explicit boolean and package version 2')
     guarded = set(guarded_indirect_offsets)
+    if checked_call_targets is not None and not isinstance(checked_call_targets, Mapping):
+        raise RewriteError('checked call targets must be an explicit mapping')
+    checked_calls = dict(checked_call_targets or {})
+    if checked_calls and (not checked_stack or package_version != 2 or checked_calls.keys() & guarded):
+        raise RewriteError('checked calls require checked v2 mode and cannot be host gates')
+    if any(type(pc) is not int or type(target) is not int for pc, target in checked_calls.items()):
+        raise RewriteError('checked call offsets and targets must be integers')
     guest_tables=set(proven_guest_indirect_offsets)
+    if checked_calls.keys() & guest_tables:
+        raise RewriteError('checked calls cannot overlap guest table transfers')
     if guest_tables and (not checked_stack or guest_tables&guarded):
         raise RewriteError('proven guest tables require checked mode and cannot be host gates')
     if guarded and indirect_policy != 'guarded-host':
@@ -2492,6 +2551,11 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
     roots = {entry_offset} if entry_offsets is None else {entry_offset, *entry_offsets}
     if any(not isinstance(root, int) or root not in by_pc for root in roots):
         raise RewriteError('entry root outside selected code')
+    for pc, target in checked_calls.items():
+        if (pc not in by_pc or struct.unpack('<I', by_pc[pc].bytes)[0] != 0xD63F0240 or
+                target not in by_pc or target not in roots or target in (pc, pc + 4)):
+            raise RewriteError('checked call requires exact BLR X18 and a distinct selected entry root')
+        kinds[pc] = 'checked_call'
     byte_jumps = {}
     native_tables={}
     producer_entries = roots | direct_entries
@@ -2548,6 +2612,8 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
             raise RewriteError('runtime guest table overlaps another source rewrite')
         kinds[pc]='readonly_table_load'
     observations, parameters = android_observation.plan(profile, by_pc, kinds, roots, sys.modules[__name__])
+    if checked_calls.keys() & (observations.keys() | parameters.keys() | {p.b for p in parameters.values()}):
+        raise RewriteError('checked calls cannot overlap profile/parameter rewrites')
     for plan in table_loads.values():
         window=set(range(plan.get('proof_start_offset',plan.get('zero_extend_offset')),plan['offset']+4,4))
         if window & (observations.keys()|parameters.keys()|{p.b for p in parameters.values()}):
@@ -2578,7 +2644,9 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
         if emitter.pc - emitter.pool_start >= HELPER_POOL_CHUNK:
             emitter.finish()
         start = emitter.pc
-        if kind == 'stack_check':
+        if ins.address in checked_calls:
+            emitter.checked_call(ins, checked_calls[ins.address])
+        elif kind == 'stack_check':
             emitter.gate(ins, stack_check=True)
         elif ins.address in table_loads:
             emitter.readonly_table_load(ins,table_loads[ins.address])
@@ -2598,7 +2666,8 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
     return Image(bytes(emitter.data), entry_offset, tuple(emitter.fixups), tuple(emitter.gates), tuple(emitter.sites),
                  profile=profile, gate_provenance=tuple(emitter.gate_provenance),
                  parameters=tuple(profile.parameters) if profile is not None else (),
-                 indirect_policy=indirect_policy, package_version=package_version, checked_stack=checked_stack).validate()
+                 indirect_policy=indirect_policy, package_version=package_version, checked_stack=checked_stack,
+                 checked_calls=tuple(sorted(checked_calls.items()))).validate()
 
 
 def main():

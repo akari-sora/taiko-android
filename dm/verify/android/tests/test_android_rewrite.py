@@ -401,7 +401,8 @@ class AndroidRewriteTests(unittest.TestCase):
                            0xD65F03C0, 0xD4000841, 0xD65F03C0))
 
     def test_input_and_metadata_bounds(self):
-        for data in (b'', b'\0', raw(0)):
+        # Exact UDF #0 is preserved by test_android_fatal; unknown words still reject.
+        for data in (b'', b'\0', raw(0xFFFFFFFF)):
             with self.assertRaises(ar.RewriteError):
                 ar.rewrite(data)
         with self.assertRaisesRegex(ar.RewriteError, 'entry'):
@@ -573,7 +574,8 @@ class AndroidRewriteTests(unittest.TestCase):
             self.assertEqual(result, 99 if source.startswith('ldr') else seed)
 
     def test_sparse_code_domains_and_patch_offsets_fail_closed(self):
-        data = raw(0xD65F03C0, 0, 0xD503201F, 0xD65F03C0)
+        # Use an unknown word: exact UDF #0 now has intentional fatal semantics.
+        data = raw(0xD65F03C0, 0xFFFFFFFF, 0xD503201F, 0xD65F03C0)
         for ranges in ([], [(0, 2)], [(0, 8), (4, 12)], [(8, 16), (0, 4)],
                        [(-4, 4)], [(0, 20)], [(0, 0)], [(0, 4, 8)], [(0, '4')]):
             with self.subTest(ranges=ranges), self.assertRaises(ar.RewriteError):

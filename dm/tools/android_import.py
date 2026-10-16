@@ -21,6 +21,7 @@ from android_rewrite import (ABI, INDIRECT_HOST, FatalWord, RewriteError, rewrit
 from nso_format import NsoError, parse_nso, parse_metadata
 from android_profiles import resolve_profile
 from android_instruction import Instruction
+from taiko_call_contract import select_checked_calls
 
 MAGIC = b'DMAMOD01'
 HEADER_SIZE = 320
@@ -300,7 +301,12 @@ again by the independent rewrite stage.
     def protected_target(pc):
         return pc < header_end or any(start <= pc < end for start, end in metadata.protected)
 
-    roots = {entry, *metadata.eh_starts, *metadata.init_addresses}
+    try:
+        versioned_checked_calls = select_checked_calls(nso, metadata) if checked_stack else ()
+    except ValueError as error:
+        raise ImportError(str(error)) from error
+    checked_calls = {item['offset']: item['target'] for item in versioned_checked_calls}
+    roots = {entry, *metadata.eh_starts, *metadata.init_addresses, *checked_calls.values()}
     extents = []
     for symbol in metadata.symbols:
         if symbol.kind == 2 and symbol.section not in (0, 0xFFF1):
@@ -595,6 +601,12 @@ again by the independent rewrite stage.
         guarded_sites.clear()
         proven_sites.clear()
         for ins in sorted(indirect,key=lambda op:op.address):
+            if ins.address in checked_calls:
+                if (struct.unpack('<I', ins.bytes)[0] != 0xD63F0240 or
+                        checked_calls[ins.address] not in instructions):
+                    raise ImportError('versioned checked call lacks exact source or audited target')
+                proven_sites.add(ins.address)
+                continue
             if checked_stack and struct.unpack('<I', ins.bytes)[0] == 0xD61F0240:
                 plan = x18_jump_table(ins,instructions,direct_targets,nso.image,
                                       ((nso.sections[1].offset,nso.sections[1].end),),root_entries=roots)
@@ -738,6 +750,10 @@ again by the independent rewrite stage.
         report['analysis_entry'] = analysis_entry
     if inline_lr is not None:
         report['inline_lr_literals']=[inline_lr]
+    if versioned_checked_calls:
+        if not checked_calls.keys() <= instructions.keys():
+            raise ImportError('versioned checked call was not selected by the original CFG')
+        report['versioned_checked_calls'] = list(versioned_checked_calls)
     if profiler_bank is not None:
         if any(profiler_bank['start'] <= pc < profiler_bank['end'] for pc in roots | direct_targets):
             raise ImportError('SDK dormant profiler bank acquired runtime entry authority')
@@ -867,7 +883,9 @@ def import_module(source, name, *, package_version=1, profile=None, indirect_pol
                     indirect_policy=indirect_policy, package_version=package_version,
                     guarded_indirect_offsets=code_report.get('guarded_indirect_sites', ()), checked_stack=checked_stack,
                     readonly_ranges=((nso.sections[1].offset,nso.sections[1].end),),
-                    proven_guest_indirect_offsets=code_report.get('proven_guest_indirect_sites',()))
+                    proven_guest_indirect_offsets=code_report.get('proven_guest_indirect_sites',()),
+                    checked_call_targets={item['offset']: item['target']
+                                          for item in code_report.get('versioned_checked_calls', ())})
     package = make_package(name, nso, metadata, image, patch_offset, package_version)
     report = {'name': name, 'source_sha256': nso.source_sha256.hex(), 'build_id': nso.build_id.hex(),
               'image_sha256': hashlib.sha256(image.bytes).hexdigest(), 'package_sha256': hashlib.sha256(package).hexdigest(),
