@@ -49,6 +49,21 @@ def _literal_overlaps_code(instructions,start,end):
     return any(pc in instructions for pc in range((start+3)&~3,end,4))
 
 
+def _adrp_page_is_consumed(ins, instructions):
+    """Only a selected adjacent ADD Xn,Xn,#imm kills this page temporary."""
+    if ins.mnemonic != 'adrp':
+        return False
+    register = struct.unpack('<I', ins.bytes)[0] & 31
+    following = instructions.get(ins.address + 4)
+    if register == 31 or following is None or following.size != 4 or len(following.bytes) != 4:
+        return False
+    word = struct.unpack('<I', following.bytes)[0]
+    # Exact 64-bit ADD (no flags, shift, or different destination). ADD #0
+    # retains the page value and must still establish its executable root.
+    return (word & 0xFFC003FF == 0x91000000 | register << 5 | register
+            and bool(word >> 10 & 4095))
+
+
 def _sdk_inline_lr_literal(nso, metadata, roots):
     """The versioned SDK assembly helper consumes BL's LR as four data bytes.
 
@@ -618,7 +633,11 @@ again by the independent rewrite stage.
         for ins in tuple(instructions.values()):
             operands = ins.operands
             if ins.mnemonic in ('adr', 'adrp'):
-                add_address_root(('address', operands[1].imm))
+                # An adjacent same-register ADD consumes the page before it
+                # can escape. Its final address is rooted by the ADD below;
+                # independently established page roots remain untouched.
+                if ins.address + 4 in direct_targets or not _adrp_page_is_consumed(ins, instructions):
+                    add_address_root(('address', operands[1].imm))
             elif ins.mnemonic in ('add', 'sub') and len(operands) == 3 and operands[1].type == ARM64_OP_REG and operands[2].type == ARM64_OP_IMM:
                 base = register_value(operands[1].reg, ins.address)
                 if base and base[0] == 'address':

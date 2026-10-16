@@ -442,6 +442,39 @@ NATIVE_CONDITIONAL_WORDS = (
         0x1400000B, 0xD5033F5F, 0x2A1F03EB, 0x3700010B,
         0xB94181AB, 0x6B0A017F, 0x2A0A03E8, 0x54FFFDA1,
     ),
+    (
+        0x0B09010A, 0x6B0B015F, 0x885F7E6A, 0x4B08016C,
+        0x1A89C189, 0x6B08015F, 0x540000E1, 0x0B08012B,
+        0x880CFE6B, 0x350000AC, 0x5280002B, 0x360000AB,
+        0x1400000B, 0xD5033F5F, 0x2A1F03EB, 0x3700010B,
+        0xB94169AB, 0x6B0A017F, 0x2A0A03E8, 0x54FFFDA1,
+    ),
+    (
+        0x0B09010A, 0x6B0B015F, 0x885F7E6A, 0x4B08016C,
+        0x1A89C189, 0x6B08015F, 0x540000E1, 0x0B08012B,
+        0x880CFE6B, 0x350000AC, 0x5280002B, 0x360000AB,
+        0x1400000B, 0xD5033F5F, 0x2A1F03EB, 0x3700010B,
+        0xB94019AB, 0x6B0A017F, 0x2A0A03E8, 0x54FFFDA1,
+    ),
+    (
+        0x0B09010A, 0x6B0B015F, 0x885F7E6A, 0x4B08016C,
+        0x1A89C189, 0x6B08015F, 0x540000E1, 0x0B08012B,
+        0x880CFE6B, 0x350000AC, 0x5280002B, 0x360000AB,
+        0x1400000B, 0xD5033F5F, 0x2A1F03EB, 0x3700010B,
+        0xB94071AB, 0x6B0A017F, 0x2A0A03E8, 0x54FFFDA1,
+    ),
+    ( # Increment compare/exchange: source315a48..315a84; closed retries.
+        0x885FFD09, 0x6B0A013F, 0x540000C1, 0x1100054A,
+        0x880B7D0A, 0x3500008B, 0x5280002A, 0x14000003,
+        0xD5033F5F, 0x2A1F03EA, 0x2A1F03E0, 0x3700008A,
+        0x7100053F, 0x2A0903EA, 0x54FFFE4A,
+    ),
+    ( # Guarded64 publication: original31b144..31b180; preload entry+16.
+        0xD5033F5F, 0x2A1F03EB, 0xAA0903EA, 0x3500018B,
+        0xB9400269, 0x34000249, 0xF900030A, 0xC85F7D09,
+        0xEB0A013F, 0x54FFFEE1, 0xC80AFD18, 0x35FFFECA,
+        0x5280002B, 0xAA0903EA, 0x34FFFECB,
+    ),
 )
 NATIVE_CONDITIONAL_FIELDS = (
     ((0,5),(5,16),(),(5,),(),(0,16),(),(0,5),(5,16),(),
@@ -475,6 +508,11 @@ NATIVE_CONDITIONAL_FIELDS = (
     ((0, 5), (0,), (), (0,), (0,), (), (0, 5, 16), (0,), (0,), (0,), (0,), (0,), (), (0,), (0,), ()),
     ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
     ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
+    ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
+    ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
+    ((0, 5, 16), (5, 16), (0, 5), (0, 5, 16), (0, 5, 16), (5, 16), (), (0, 5, 16), (0, 5, 16), (0,), (0,), (0,), (), (), (0, 16), (0,), (0, 5), (5, 16), (0, 16), ()),
+    ((0, 5), (5, 16), (), (0, 5), (0, 5, 16), (0,), (0,), (), (), (0, 16), (0, 16), (0,), (5,), (0, 16), ()),
+    ((), (0, 16), (0, 16), (0,), (0, 5), (0,), (0, 5), (0, 5), (5, 16), (), (0, 5, 16), (0,), (0,), (0, 16), (0,)),
 )
 
 
@@ -582,18 +620,18 @@ def native_conditional_refresh(start, by_pc, kinds, api):
     """
     for variant, (words, fields) in enumerate(zip(NATIVE_CONDITIONAL_WORDS,
                                                 NATIVE_CONDITIONAL_FIELDS)):
-        begin = start.address - (0, 0, 20, 0, 20, 16, 4, 4, 4, 4, 20, 20, 0, 72, 28, 32, 32, 0, 0, 0, 8, 0, 0, 12, 0, 8, 8)[variant]
+        begin = start.address - (0, 0, 20, 0, 20, 16, 4, 4, 4, 4, 20, 20, 0, 72, 28, 32, 32, 0, 0, 0, 8, 0, 0, 12, 0, 8, 8, 8, 8, 8, 0, 28)[variant]
         block = tuple(by_pc.get(begin + i*4) for i in range(len(words)))
         if begin < 0 or any(ins is None for ins in block):
             continue
-        external = ((6,), (5,), (2, 4), (4, 9), (3,), (3,), (), (), (), (7,), (4, 9), (4, 9), (15,), (), (), (2, 7, 15), (2, 15), (), (10, 16), (10,), (11, 15), (), (6, 10), (2, 14), (5, 9, 15), (12, 15), (12, 15))[variant]
+        external = ((6,), (5,), (2, 4), (4, 9), (3,), (3,), (), (), (), (7,), (4, 9), (4, 9), (15,), (), (), (2, 7, 15), (2, 15), (), (10, 16), (10,), (11, 15), (), (6, 10), (2, 14), (5, 9, 15), (12, 15), (12, 15), (12, 15), (12, 15), (12, 15), (), (5,))[variant]
         roles, reverse, matched = {}, {}, True
         for index, (ins, expected, shifts) in enumerate(zip(block, words, fields)):
             value = struct.unpack('<I', ins.bytes)[0]
             mask = sum(31 << shift for shift in shifts)
             if index in external:
-                bits = 14 if (variant,index) in ((15, 2), (16, 2), (18, 10), (19, 10), (20, 11), (22, 6), (22, 10), (24, 9), (25, 15), (26, 15)) else 19
-                mask |= 0x3FFFFFF if (variant,index) in ((3, 9), (9, 7), (10, 9), (11, 9), (12, 15), (15, 15), (16, 15), (18, 16), (20, 15), (23, 14), (24, 5), (24, 15), (25, 12), (26, 12)) else ((1 << bits) - 1) << 5
+                bits = 14 if (variant,index) in ((15, 2), (16, 2), (18, 10), (19, 10), (20, 11), (22, 6), (22, 10), (24, 9), (25, 15), (26, 15), (27, 15), (28, 15), (29, 15)) else 19
+                mask |= 0x3FFFFFF if (variant,index) in ((3, 9), (9, 7), (10, 9), (11, 9), (12, 15), (15, 15), (16, 15), (18, 16), (20, 15), (23, 14), (24, 5), (24, 15), (25, 12), (26, 12), (27, 12), (28, 12), (29, 12)) else ((1 << bits) - 1) << 5
             if value & ~mask != expected & ~mask:
                 matched = False
                 break
@@ -614,7 +652,7 @@ def native_conditional_refresh(start, by_pc, kinds, api):
             continue
         nodes = {ins.address for ins in block}
         exits = [block[index].operands[-1].imm for index in external]
-        if variant in (25,26) and exits[0]!=exits[1]:
+        if variant in (25,26,27,28,29) and exits[0]!=exits[1]:
             continue # This clamp row has one shared completed-attempt exit.
         exits.append(begin + len(words)*4)
         if any(pc in nodes or pc not in by_pc or api.is_fatal_instruction(by_pc[pc])
@@ -626,8 +664,8 @@ def native_conditional_refresh(start, by_pc, kinds, api):
             validate_memory_operands(ins,api)
             if ins.mnemonic in api.EXCLUSIVE_LOADS | api.EXCLUSIVE_STORES:
                 validate_exclusive(ins,api)
-        entry = begin + (0, 0, 12, 0, 16, 4, 0, 0, 0, 0, 20, 20, 0, 4, 28, 32, 32, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0)[variant]
-        heads = {begin+offset for offset in ((0, 28), (0, 28), (20,), (0, 20), (20,), (16,), (4,), (4,), (4,), (4,), (20,), (20,), (0,), (72, 144), (28,), (32,), (32,), (0,), (0,), (0,), (8,), (0,), (0,), (12,), (0,), (8,), (8,))[variant]}
+        entry = begin + (0, 0, 12, 0, 16, 4, 0, 0, 0, 0, 20, 20, 0, 4, 28, 32, 32, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 16)[variant]
+        heads = {begin+offset for offset in ((0, 28), (0, 28), (20,), (0, 20), (20,), (16,), (4,), (4,), (4,), (4,), (20,), (20,), (0,), (72, 144), (28,), (32,), (32,), (0,), (0,), (0,), (8,), (0,), (0,), (12,), (0,), (8,), (8,), (8,), (8,), (8,), (0,), (28,))[variant]}
         return nodes,entry,heads
     return None
 
