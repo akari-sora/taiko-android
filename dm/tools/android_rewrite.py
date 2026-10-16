@@ -1987,6 +1987,18 @@ def _native_u16_boolean_index(load, target, loaded, table, index, by_pc):
                 boolean_source_offsets=pcs,boolean_native_sources=list(registers_),boolean_field_bits=[3,2,1,0])
 
 
+def _native_table_writes(ins):
+    """Effective GPR writes, including Capstone's flag-setting alias omissions."""
+    def canonical(name):
+        return {'lr':'x30','fp':'x29','wsp':'sp'}.get(name,name.replace('w','x',1))
+    writes={canonical(ins.reg_name(r)) for r in ins.regs_access()[1]}
+    if ins.mnemonic in ('cmp','cmn','tst','ccmp','ccmn'):
+        return writes-{'x'+str(r) for r in range(31)}
+    if ins.update_flags and ins.operands and ins.operands[0].type==ARM64_OP_REG:
+        writes.add(canonical(ins.reg_name(ins.operands[0].reg)))
+    return writes
+
+
 def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *, virtual_table=False, virtual_loaded=False, known_tables=(), root_entries=None):
     """Normalize native dispatch around the actual checked read, not its prefix.
 
@@ -2011,7 +2023,7 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
         if (op is None or is_fatal_instruction(op) or op.mnemonic in ('svc','hvc','smc') or
                 any(op.group(group) for group in (CS_GRP_JUMP,CS_GRP_CALL,CS_GRP_RET))):
             return None
-        writes={op.reg_name(r).replace('w','x',1) for r in op.regs_access()[1]}
+        writes=_native_table_writes(op)
         if 'x'+str(target) in writes:
             addition=pc;break
     if addition is None or value(addition)&~(31<<16)!=0x8B000800|(target<<5)|target:
@@ -2022,7 +2034,8 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
     loaded,table_register,index=load_word&31,load_word>>5&31,load_word>>16&31
     roles=(target,loaded,table_register,index)
     width=1 if load_word&~((31<<16)|(31<<5)|31)==0x38606800 else 2
-    ordinary_roles=(target,loaded,index) if virtual_table else (target,table_register,index) if virtual_loaded else roles
+    lr_table=(not (virtual_table or virtual_loaded) and width==2 and table_register==30)
+    ordinary_roles=(target,loaded,index) if virtual_table or lr_table else (target,table_register,index) if virtual_loaded else roles
     if (virtual_table and table_register!=18 or
             virtual_loaded and loaded!=18 or
             len(set(roles))!=4 or any(r==18 or r>=29 for r in ordinary_roles) or
@@ -2165,10 +2178,33 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
         return None
     size=width*(bound+1)
     tables=[row for row in tables if row[2]%width==0 and any(begin<=row[2] and row[2]+size<=end for begin,end in readonly_ranges)]
+    if lr_table:
+        # LR is data only in this native-u16 table role. Selected source may
+        # construct it far before the read, but never across a call/LR write.
+        # No dominance or call-preservation inference: the leaf read guard
+        # compares the actual LR, native base and full64 index before LDRH.
+        tables=[]
+        for page_pc in range(max(0,load-4096),load-4,4):
+            page=by_pc.get(page_pc)
+            if page is None or page.mnemonic!='adrp' or value(page_pc)&31!=30:
+                continue
+            for add_pc in range(page_pc+4,min(page_pc+60,load-4),4):
+                side=by_pc.get(add_pc);side_word=value(add_pc)
+                if side_word is not None and side_word&0xFFC003FF==0x910003DE:
+                    table=page.operands[1].imm+(side_word>>10&4095)
+                    if (not any(pc in entries or pc in (root_entries or ()) for pc in range(page_pc+4,add_pc+4,4)) and
+                            table%2==0 and any(begin<=table and table+size<=end for begin,end in readonly_ranges)):
+                        tables.append((page_pc,add_pc,table))
+                    break
+                if (side is None or is_fatal_instruction(side) or side.update_flags or
+                        side.mnemonic in ('svc','hvc','smc') or site_kind(side) not in (None,'x18') or
+                        any(side.group(group) for group in (CS_GRP_JUMP,CS_GRP_CALL,CS_GRP_RET)) or
+                        _native_table_writes(side)&{'x30','x29','sp','nzcv'}):
+                    break
     guard=by_pc.get(compare+4);wide_setup=False
     wide_compare=(width==2 and 63<bound<=255 and not bound_details[compare] and guard is not None and
                   value(compare+4)&0xFF00001F==0x54000008 and not compare+4<guard.operands[0].imm<=branch)
-    if not tables and not (virtual_table or virtual_loaded) and (bound<=63 or wide_compare):
+    if not tables and not (virtual_table or virtual_loaded or lr_table) and (bound<=63 or wide_compare):
         # Native libc tables interleave independent setup: up to nine words
         # for u16 or ten for u8. Preserve existing near plans and never infer
         # page dominance. The wider u16 sibling also requires an exact CMP/HI.
@@ -2245,9 +2281,35 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
         # flags/index intact; setup ADDs touch only independent temporaries.
         # The four suffix MOVs retain all effects after the target ADD, and
         # every entrance still passes the existing actual full64 read guard.
-    if len({row[1] for row in bounds})!=1 or bound>(255 if canonical_copy or wide_setup or native_byte_inline or native_sp_store_u16 else 63):
+    native_six_u16=False
+    if (not (virtual_table or virtual_loaded or lr_table) and width==2 and not bound_details[compare] and
+            compare==load-32 and addition==branch-28 and base==branch+4 and
+            value(compare)&0xFFC003FF==0x7100001F|(index<<5) and guard is not None and
+            value(compare+4)&0xFF00001F==0x54000008 and not compare+4<guard.operands[0].imm<=branch):
+        schedule=[value(load+d) for d in (-36,-24,-20,-16,-12,-8,8,12,16,20,24,28)]
+        if all(word_ is not None for word_ in schedule):
+            sub,store,save,frame_store,step,old_target,zero0,zero1,frame,imm0,imm1,last=schedule
+            source=sub>>5&31;saved=store&31;save_pointer=save&31;frame_source=frame_store&31
+            step_source=step>>5&31;step_result=step&31;zero=zero1&31;frame_result=frame&31
+            first_immediate=imm0&31;second_immediate=imm1&31;last_source=last>>16&31
+            ordinary=(source,saved,save_pointer,frame_source,step_source,step_result,zero,frame_result,
+                      first_immediate,second_immediate,last_source)
+            native_six_u16=(all(r not in (18,29,30,31) and r not in roles for r in ordinary) and
+                len(set(ordinary))==len(ordinary) and
+                sub&0xFFC003FF==0x51000000|(source<<5)|index and
+                store==0xF90013E0|saved and save==0xAA0003E0|(loaded<<16)|save_pointer and
+                frame_store==0xF81E03A0|frame_source and step==0x91000400|(step_source<<5)|step_result and
+                old_target==0x2A0003E0|(target<<16)|step_source and
+                zero0==0x2A1F03E0|source and zero1==0x2A1F03E0|zero and
+                frame==0xD10013A0|frame_result and imm0&~(0xFFFF<<5)==0x52800000|first_immediate and
+                imm1&~(0xFFFF<<5)==0x52A00000|second_immediate and
+                last==0xAA0003E0|(last_source<<16)|saved)
+        # Exact effects matter: the prefix consumes the old loaded/target
+        # values and stores the old saved argument before suffix overwrites.
+        # Keep every word in place; only the actual read receives a veneer.
+    if len({row[1] for row in bounds})!=1 or bound>(255 if canonical_copy or wide_setup or native_byte_inline or native_sp_store_u16 or native_six_u16 else 63):
         return None
-    if addition==branch-28 and bound_details[compare].get('bound_candidate_kind')!='masked-extraction':
+    if addition==branch-28 and bound_details[compare].get('bound_candidate_kind')!='masked-extraction' and not native_six_u16:
         return None
     # Exact inline ADRP/ADD/ADR/LDR defines this source table immediately.
     # Newly discovered earlier cases may reuse the register for other RO
@@ -2288,7 +2350,7 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
     if inline:
         tables=inline
     reaching=[]
-    if (bound_details[compare].get('bound_candidate_kind')=='masked-extraction' and
+    if (not lr_table and bound_details[compare].get('bound_candidate_kind')=='masked-extraction' and
             (not tables or len({row[2] for row in tables})!=1)):
         candidates=[]
         for pc in range(max(0,load-4096),load-4,4):
@@ -2331,6 +2393,8 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
                 entry_policy='all-paths-must-pass-actual-native-read-guard-v1',
                 **(dict(bound_candidate_kind='scheduled-u16-sp-stores',scheduled_guard_offset=load-28,
                         preserved_sp_store_offsets=[compare+4,compare+8,compare+12,load-8]) if native_sp_store_u16 else {}),
+                **(dict(bound_candidate_kind='u16-six-native-suffix') if native_six_u16 else {}),
+                **(dict(table_constructor_gap=add-page,table_candidate_kind='native-u16-lr-data') if lr_table else {}),
                 rule=('runtime-virtual-table-x18-guarded-readonly-lsl2-v1' if virtual_table else
                       'runtime-virtual-loaded-x18-guarded-readonly-lsl2-v1' if virtual_loaded else
                       'runtime-native-guarded-readonly-lsl2-v1'),**bound_details[compare],
