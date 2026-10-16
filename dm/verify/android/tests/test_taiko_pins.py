@@ -133,6 +133,20 @@ class TaikoPinTests(unittest.TestCase):
         report['rewrite']['checked_calls'] = []
         self.verify(report)
 
+    def test_unmatched_source_rejects_forged_forest_discovery_or_rewrite(self):
+        for owner, key in (('code_discovery', 'versioned_checked_call_forests'),
+                           ('rewrite', 'checked_call_forests')):
+            report = copy.deepcopy(self.report)
+            report[owner][key] = [dict(version=1, target_count=1)]
+            with self.subTest(owner=owner), self.assertRaisesRegex(ValueError, 'forest audit.*unmatched source'):
+                self.verify(report)
+
+    def test_unmatched_source_accepts_explicit_empty_forest_metadata(self):
+        report = copy.deepcopy(self.report)
+        report['code_discovery']['versioned_checked_call_forests'] = []
+        report['rewrite']['checked_call_forests'] = []
+        self.assertEqual([], self.verify(report)['versioned_checked_call_forests'])
+
     def checked_call_fixture(self):
         # Selector output is stubbed only for isolated verifier coverage. It
         # never reaches generate(), emit_provider(), or production pin matching.

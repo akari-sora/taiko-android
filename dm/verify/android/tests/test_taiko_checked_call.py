@@ -42,10 +42,10 @@ class CheckedCallTests(unittest.TestCase):
         return ar.rewrite(source, code_ranges=ranges, entry_offsets=[0, 0x100],
                           package_version=2, checked_stack=True, checked_call_targets={0: 0x100})
 
-    def execute(self, value, *, base=0x10000000, flags=0xB0000000):
+    def execute(self, value, *, base=0x10000000, flags=0xB0000000, target_offset=0x100):
         image = self.image()
         cpu = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
-        cpu.mem_map(base, 0x10000)
+        cpu.mem_map(base, max(0x10000, (len(image.bytes) + 4095) & ~4095))
         cpu.mem_map(0x20000000, 0x10000)
         cpu.mem_map(0x30000000, 0x10000)
         state, helper, output, stack = 0x30000000, 0x30001000, 0x30002000, 0x20008000
@@ -74,7 +74,7 @@ class CheckedCallTests(unittest.TestCase):
         def step(machine, pc, size, _):
             instruction = ar.decode(struct.unpack('<I', machine.mem_read(pc, 4))[0], pc)
             self.assertFalse(ar.has18(instruction), 'No executed instruction may access hardware X18')
-            if pc == base + 0x100:
+            if pc == base + target_offset:
                 observed['target'] = True
             if pc == base + 4:
                 observed['returned'] = True
@@ -143,6 +143,14 @@ class CheckedCallTests(unittest.TestCase):
     def test_unrelated_source_identity_has_no_versioned_call_authority(self):
         fake = SimpleNamespace(source_sha256=bytes(32), build_id=bytes(32))
         self.assertEqual((), contract.select_checked_calls(fake, None))
+
+    def test_explicit_entry_origins_cannot_promote_a_table_only_target_to_callback(self):
+        source, ranges = fixture()
+        options = dict(code_ranges=ranges, entry_offsets=(0, 0x100), package_version=2,
+                       checked_stack=True, checked_call_targets={0: 0x100})
+        with self.assertRaisesRegex(ar.RewriteError, 'independent'):
+            ar.rewrite(source, independent_entry_offsets=(0,), **options)
+        ar.rewrite(source, independent_entry_offsets=(0, 0x100), **options)
 
 
 class CallContractTests(unittest.TestCase):

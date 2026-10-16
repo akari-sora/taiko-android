@@ -23,6 +23,12 @@ WORD_CHECKS = (
     (TARGET_OFFSET, (0xD10103FF, 0x6D0123E9, 0xA9027BFD, 0x910083FD)),
 )
 EH_ENTRIES = (TARGET_OFFSET, 0xDB9A20, 0xDBB640, 0xED0560, 0xED0570)
+FOREST_CALL_OFFSET = 0x292702C
+FOREST_WORD_CHECKS = (
+    (0x2927004, (0xF9400F11, 0xF9406231, 0xF9401A32, 0xF9400252,
+                 0xA90427E8, 0xB90053EA, 0xA90233EB, 0xA90337EE,
+                 0xA9013FF0, 0xF9401A22, 0xD63F0240)),
+)
 
 
 def select_checked_calls(nso, metadata):
@@ -57,3 +63,37 @@ def select_checked_calls(nso, metadata):
                                setter_offset=0xDB9A20, setter_wrapper_offset=0xED0560,
                                clear_wrapper_offset=0xED0570, slot_offset=SLOT_OFFSET,
                                relocation_kind=1027, target_eh_entry=TARGET_OFFSET)),)
+
+
+def select_checked_call_forest(nso, metadata):
+    """Only this pinned generated callback may use the validated EH entry set.
+
+    This source reads a mutable generated function pointer through X17/X18;
+    it is not a constant or a read-only switch. Every admitted target is an
+    indexed positive-range entry validated against its actual FDE/CIE before
+    original CFG discovery and ABI rewriting. Indexed zero-range and unindexed
+    records grant no target authority, including same-PC alternatives.
+    No external mapping/JSON selector reaches this contract.
+    """
+    if nso.source_sha256.hex() != MAIN_SHA256 or nso.build_id.hex() != MAIN_BUILD_ID:
+        return None
+    for offset, words in FOREST_WORD_CHECKS:
+        expected = struct.pack('<' + 'I' * len(words), *words)
+        if not (nso.sections[0].offset <= offset and offset + len(expected) <= nso.sections[0].end and
+                nso.image[offset:offset + len(expected)] == expected):
+            raise ValueError(f'pinned Taiko call forest: original pointer chain changed at 0x{offset:x}')
+    # Keep the parser import local: unrelated modules never acquire its authority.
+    from nso_eh import validated_eh_functions, eh_target_set_sha256
+    records = validated_eh_functions(nso, metadata)  # Unknown/malformed CIE/FDE propagates.
+    targets = tuple(record.start for record in records)
+    if (not targets or any(type(pc) is not int or pc <= 0 or pc % 4 or pc >= nso.sections[0].end for pc in targets)
+            or any(a >= b for a, b in zip(targets, targets[1:]))):
+        raise ValueError('pinned Taiko call forest: invalid sorted EH entry set')
+    if not any(record.start == 0x2926E60 and record.end == 0x2927164 for record in records):
+        raise ValueError('pinned Taiko call forest: caller FDE range changed')
+    return dict(offset=FOREST_CALL_OFFSET, source_word=0xD63F0240,
+                rule='versioned-taiko-main-eh-callback-forest-v1',
+                source_sha256=MAIN_SHA256, build_id=MAIN_BUILD_ID,
+                targets=targets, target_count=len(targets), target_sha256=eh_target_set_sha256(records),
+                caller_eh_start=0x2926E60, caller_eh_end=0x2927164,
+                target_policy='runtime-exact-positive-indexed-EH-entry; zero-range/unindexed/unknown/interior/null/cross-module trap')

@@ -21,7 +21,8 @@ from android_rewrite import (ABI, INDIRECT_HOST, FatalWord, RewriteError, rewrit
 from nso_format import NsoError, parse_nso, parse_metadata
 from android_profiles import resolve_profile
 from android_instruction import Instruction
-from taiko_call_contract import select_checked_calls
+from taiko_sdk_contract import select_sdk_inline_layout
+from taiko_call_contract import select_checked_calls, select_checked_call_forest
 
 MAGIC = b'DMAMOD01'
 HEADER_SIZE = 320
@@ -56,18 +57,29 @@ def _sdk_inline_lr_literal(nso, metadata, roots):
     external/direct/address root that could bypass that save. No generic
     undecodable word or nonreturn call receives this exemption.
     """
-    if nso.source_sha256.hex()!='1c9f198a91c0bcfee5cf8f5b53fb941895e91334dfb766ce79fc68576797f017':
-        return None
-    start,end,call,literal,reader=0x352658,0x35274C,0x3526C8,0x3526CC,0x3526D0
+    if nso.source_sha256.hex()=='1c9f198a91c0bcfee5cf8f5b53fb941895e91334dfb766ce79fc68576797f017':
+        start,end,call,literal,reader=0x352658,0x35274C,0x3526C8,0x3526CC,0x3526D0
+        body_identity='023312f9ac1c83766f3ac96df86713179a5aaaf882ed5464d2716d4afcbc3624'
+        target_bss=0xCFF508
+    else:
+        try:
+            layout=select_sdk_inline_layout(nso)
+        except ValueError as error:
+            raise ImportError(str(error)) from error
+        if layout is None:
+            return None
+        start,end=layout.function_start,layout.function_end
+        call,literal,reader=layout.call_offset,layout.literal_start,layout.reader_offset
+        body_identity,target_bss=layout.body_sha256,layout.target_bss
     body=bytearray(nso.image[start:end])
     if len(body)!=244:
         return None
     body[literal-start:literal-start+4]=bytes(4)
     identity=hashlib.sha256(body).hexdigest()
-    if identity!='023312f9ac1c83766f3ac96df86713179a5aaaf882ed5464d2716d4afcbc3624':
+    if identity!=body_identity:
         return None
     target=literal+struct.unpack_from('<i',nso.image,literal)[0]
-    if target!=0xCFF508 or not nso.sections[2].end<=target<=len(nso.image)-28:
+    if target!=target_bss or not nso.sections[2].end<=target<=len(nso.image)-28:
         raise ImportError('SDK inline LR literal target is outside its verified BSS object')
     if any(start<pc<end for pc in roots) or any(a<literal+4 and literal<b for a,b in metadata.protected):
         raise ImportError('SDK inline LR helper has a metadata/interior entry')
@@ -103,7 +115,7 @@ def _sdk_inline_lr_literal(nso, metadata, roots):
             raise ImportError('SDK inline LR helper contains an unknown instruction')
         ops[pc]=decoded[0]
     pending=[(start,0,'caller',False)];seen=set();returns=set()
-    adjustments={start:-16,start+4:-16,start+8:-16,0x352734:16,0x352738:16,0x35273C:16}
+    adjustments={start:-16,start+4:-16,start+8:-16,start+0xDC:16,start+0xE0:16,start+0xE4:16}
     while pending:
         pc,sp,lr,saved=pending.pop();state=(pc,sp,lr,saved)
         if state in seen:
@@ -117,7 +129,7 @@ def _sdk_inline_lr_literal(nso, metadata, roots):
                 raise ImportError('SDK inline LR caller save is bypassed')
             saved=True
         sp+=adjustments.get(pc,0)
-        if pc==0x35273C:
+        if pc==start+0xE4:
             if not saved or sp!=0:
                 raise ImportError('SDK inline LR caller restore is bypassed')
             lr='caller'
@@ -137,7 +149,7 @@ def _sdk_inline_lr_literal(nso, metadata, roots):
         if ins.group(CS_GRP_JUMP) and ins.mnemonic!='blr':
             successors=[ins.operands[-1].imm]+([] if ins.mnemonic=='b' else [pc+4])
         pending.extend((next_pc,sp,lr,saved) for next_pc in successors)
-    if returns!={0x352740}:
+    if returns!={start+0xE8}:
         raise ImportError('SDK inline LR helper return set changed')
     return dict(function_start=start,function_end=end,call_offset=call,literal_start=literal,
                 literal_end=literal+4,reader_offset=reader,target_bss=target,body_sha256=identity,
@@ -303,10 +315,13 @@ again by the independent rewrite stage.
 
     try:
         versioned_checked_calls = select_checked_calls(nso, metadata) if checked_stack else ()
+        forest_contract = select_checked_call_forest(nso, metadata) if checked_stack else None
     except ValueError as error:
         raise ImportError(str(error)) from error
     checked_calls = {item['offset']: item['target'] for item in versioned_checked_calls}
-    roots = {entry, *metadata.eh_starts, *metadata.init_addresses, *checked_calls.values()}
+    forest_targets = forest_contract['targets'] if forest_contract is not None else ()
+    forest_site = forest_contract['offset'] if forest_contract is not None else None
+    roots = {entry, *metadata.eh_starts, *metadata.init_addresses, *checked_calls.values(), *forest_targets}
     extents = []
     for symbol in metadata.symbols:
         if symbol.kind == 2 and symbol.section not in (0, 0xFFF1):
@@ -328,6 +343,7 @@ again by the independent rewrite stage.
     # Analysis-only entries select ABI-sensitive dormant code without adding
     # runtime/callback roots or claiming an original control-flow entrance.
     analysis_entries = profiler_bank['analysis_entries'] if profiler_bank else ()
+    independent_roots=set(roots)
     instructions, pending = {}, list(sorted(roots)) + list(analysis_entries)
     def instruction(pc):
         if pc % 4 or not 0 <= pc <= text.end - 4:
@@ -564,6 +580,7 @@ again by the independent rewrite stage.
         # Record every proven entry; only decoding work is conditional.
         address_taken_roots.add(target)
         roots.add(target)
+        independent_roots.add(target)
         direct_targets.add(target)
         if target not in instructions:
             pending.append(target)
@@ -582,7 +599,7 @@ again by the independent rewrite stage.
         # address-root pass. Complete the existing monotonic CFG fixed point
         # before treating its not-yet-proved x18 transfer as a final failure.
         # New entrances into already decoded code also require re-proving.
-        count_before = (len(instructions),len(roots),len(direct_targets),table_context())
+        count_before = (len(instructions),len(roots),len(independent_roots),len(direct_targets),table_context())
         deferred_x18 = []
         discover_literals()
         for ins in tuple(instructions.values()):
@@ -601,6 +618,11 @@ again by the independent rewrite stage.
         guarded_sites.clear()
         proven_sites.clear()
         for ins in sorted(indirect,key=lambda op:op.address):
+            if ins.address == forest_site:
+                if struct.unpack('<I', ins.bytes)[0] != 0xD63F0240:
+                    raise ImportError('versioned call forest lacks exact original BLR X18')
+                proven_sites.add(ins.address)
+                continue
             if ins.address in checked_calls:
                 if (struct.unpack('<I', ins.bytes)[0] != 0xD63F0240 or
                         checked_calls[ins.address] not in instructions):
@@ -609,7 +631,8 @@ again by the independent rewrite stage.
                 continue
             if checked_stack and struct.unpack('<I', ins.bytes)[0] == 0xD61F0240:
                 plan = x18_jump_table(ins,instructions,direct_targets,nso.image,
-                                      ((nso.sections[1].offset,nso.sections[1].end),),root_entries=roots)
+                                      ((nso.sections[1].offset,nso.sections[1].end),),root_entries=roots,
+                                      text_size=text.end,protected_ranges=((0,header_end),*metadata.protected))
                 if plan is None:
                     byte_jumps.pop(ins.address,None)
                     deferred_x18.append(ins.address)
@@ -625,7 +648,8 @@ again by the independent rewrite stage.
                 continue
             if checked_stack:
                 plan=readonly_guest_table(ins,instructions,direct_targets,nso.image,
-                                               ((nso.sections[1].offset,nso.sections[1].end),),known_tables=(byte_jumps,guest_tables))
+                                               ((nso.sections[1].offset,nso.sections[1].end),),known_tables=(byte_jumps,guest_tables),
+                                               root_entries=independent_roots)
                 if plan is not None:
                     guest_tables[ins.address]=plan
                     for target_pc in (plan['base']+value*4 for value in plan['target_values']):
@@ -649,6 +673,7 @@ again by the independent rewrite stage.
                 target = ('code', target[1])
             if target and target[0] == 'code':
                 roots.add(target[1])
+                independent_roots.add(target[1])
             if not target or (target[0] == 'code' and target[1] not in instructions):
                 if indirect_policy == 'guarded-host':
                     try:
@@ -661,7 +686,7 @@ again by the independent rewrite stage.
                                       rejected_indirect_sites=(ins.address,))
             else:
                 proven_sites.add(ins.address)
-        if (len(instructions),len(roots),len(direct_targets),table_context()) == count_before:
+        if (len(instructions),len(roots),len(independent_roots),len(direct_targets),table_context()) == count_before:
             if deferred_x18:
                 pc=deferred_x18[0]
                 raise ImportError(f'0x{pc:x}: unproven byte dispatch br x18',rejected_indirect_sites=(pc,))
@@ -733,7 +758,7 @@ again by the independent rewrite stage.
             ranges[-1] = (ranges[-1][0], pc + 4)
         else:
             ranges.append((pc, pc + 4))
-    report = {'roots': sorted(roots), 'function_extents': sorted(extents),
+    report = {'roots': sorted(roots), 'independent_roots': sorted(independent_roots), 'function_extents': sorted(extents),
                     'selected_words': len(instructions), 'proven_indirect_sites': [x.address for x in indirect if x.address in proven_sites],
                     'address_taken_roots': sorted(address_taken_roots), 'proven_literal_ranges': sorted(literal_ranges),
                     'indirect_memory_policy': 'relocation-backed targets; reject discovered overlapping/unknown-alias writes and writable-image pointers passed to imports; trusted host ABI',
@@ -754,6 +779,10 @@ again by the independent rewrite stage.
         if not checked_calls.keys() <= instructions.keys():
             raise ImportError('versioned checked call was not selected by the original CFG')
         report['versioned_checked_calls'] = list(versioned_checked_calls)
+    if forest_contract is not None:
+        if forest_site not in instructions or any(target not in instructions for target in forest_targets):
+            raise ImportError('versioned call forest source/target lacks original CFG audit')
+        report['versioned_checked_call_forests'] = [{key: value for key, value in forest_contract.items() if key != 'targets'}]
     if profiler_bank is not None:
         if any(profiler_bank['start'] <= pc < profiler_bank['end'] for pc in roots | direct_targets):
             raise ImportError('SDK dormant profiler bank acquired runtime entry authority')
@@ -767,9 +796,12 @@ again by the independent rewrite stage.
         report['stack_pointer_policy'] = 'v2 immutable STACK_CHECK preflight for every admitted SP writer; active invocation bounds, alignment and headroom; SP stores conservatively taint relocation slots'
     if byte_jumps:
         report['byte_jump_tables'] = [byte_jumps[pc] for pc in sorted(byte_jumps) if 'target_values' not in byte_jumps[pc]]
-        halfwords=[byte_jumps[pc] for pc in sorted(byte_jumps) if 'target_values' in byte_jumps[pc]]
+        halfwords=[byte_jumps[pc] for pc in sorted(byte_jumps) if 'target_values' in byte_jumps[pc] and not byte_jumps[pc].get('signed_relative')]
         if halfwords:
             report['halfword_jump_tables']=halfwords
+        signed=[byte_jumps[pc] for pc in sorted(byte_jumps) if byte_jumps[pc].get('signed_relative')]
+        if signed:
+            report['signed_relative_jump_tables']=signed
     if guest_tables:
         report['readonly_guest_jump_tables']=[guest_tables[pc] for pc in sorted(guest_tables)]
         report['proven_guest_indirect_sites']=sorted(guest_tables)
@@ -877,15 +909,20 @@ def import_module(source, name, *, package_version=1, profile=None, indirect_pol
             raise ImportError('hashless NSO symbol extent must be adjacent to strings for package v1 verification')
     code_ranges, code_report = discover_code(nso, metadata, indirect_policy=indirect_policy, checked_stack=checked_stack)
     patch_offset = align(len(nso.image), 16384)
+    forest_contract = (select_checked_call_forest(nso, metadata)
+                       if code_report.get('versioned_checked_call_forests') else None)
     image = rewrite(nso.image, code_report.get('analysis_entry', {}).get('offset', 0), nso.sections[0].end,
                     code_ranges=code_ranges, patch_offset=patch_offset,
                     entry_offsets=code_report['roots'], profile=selected_profile,
+                    independent_entry_offsets=code_report['independent_roots'],
                     indirect_policy=indirect_policy, package_version=package_version,
                     guarded_indirect_offsets=code_report.get('guarded_indirect_sites', ()), checked_stack=checked_stack,
                     readonly_ranges=((nso.sections[1].offset,nso.sections[1].end),),
                     proven_guest_indirect_offsets=code_report.get('proven_guest_indirect_sites',()),
                     checked_call_targets={item['offset']: item['target']
-                                          for item in code_report.get('versioned_checked_calls', ())})
+                                          for item in code_report.get('versioned_checked_calls', ())},
+                    checked_call_forest_offsets=(forest_contract['offset'],) if forest_contract else (),
+                    checked_call_forest_targets=forest_contract['targets'] if forest_contract else ())
     package = make_package(name, nso, metadata, image, patch_offset, package_version)
     report = {'name': name, 'source_sha256': nso.source_sha256.hex(), 'build_id': nso.build_id.hex(),
               'image_sha256': hashlib.sha256(image.bytes).hexdigest(), 'package_sha256': hashlib.sha256(package).hexdigest(),

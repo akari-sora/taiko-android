@@ -18,6 +18,7 @@ import tempfile
 from android_rewrite import decode, indirect_register, stack_check_operation
 from nso_format import parse_nso, parse_metadata
 from taiko_call_contract import select_checked_calls
+from taiko_forest_audit import verify_checked_call_forests
 from taiko_content import (ABI, PROGRAM_ID, MODULE_ORDER, SOURCE_PINS,
     checked_stat, digest_file, resource_tree, source_records, validate_component,
     validate_sources, require)
@@ -236,13 +237,15 @@ def verify_package(path, report, source, nso, metadata):
         require(struct.unpack_from('<I', image, item['offset'])[0] & 0xfc000000 == 0x14000000 and
             not any(origin['original_offset'] == item['offset'] for origin in provenance),
             'checked-call source must use its recorded direct stub without a native gate')
+    checked_forests = verify_checked_call_forests(nso, metadata, image, discovery, rewrite,
+        sites, ranges, fixups, provenance)
     audit = dict(callback_audit_version=1, package_sha256=digest, source_sha256=source['source_sha256'],
         indirect_policy='guarded-host', callback_root_kind='defined-stt-func', callback_roots=roots)
     require(report.get('callback_audit') == audit, 'callback receipt differs from original defined STT_FUNC entries')
     return dict(name=name, source_sha256=source['source_sha256'], package_sha256=digest, image_sha256=image_digest,
         package_bytes=len(data), image_bytes=image_size, callback_audit=audit,
         original_image_restored_sha256=sha(restored), site_count=site_count, gate_count=gate_count, fixup_count=fixup_count,
-        versioned_checked_calls=checked_calls)
+        versioned_checked_calls=checked_calls, versioned_checked_call_forests=checked_forests)
 
 
 def verify_content(directory, modules, import_sha):
@@ -368,7 +371,8 @@ def generate(source, capsules, content, output, audit_output):
     audit = dict(schema=1, build=BUILD, program_id=PROGRAM_ID, npdm_sha256=SOURCE_PINS['main.npdm']['sha256'],
         rtld=facts['rtld'], sources=[facts[name] for name in MODULE_ORDER], import_inventory=inventory,
         recipe_sha256={name: sha((ROOT / 'dm/tools' / name).read_bytes()) for name in
-            ('gen_taiko_pins.py', 'taiko_content.py', 'taiko_call_contract.py', 'nso_format.py', 'android_import.py', 'android_rewrite.py', 'android_exclusive.py', 'android_instruction.py')})
+            ('gen_taiko_pins.py', 'taiko_content.py', 'taiko_call_contract.py', 'taiko_sdk_contract.py', 'taiko_forest_audit.py',
+             'nso_eh.py', 'nso_format.py', 'android_import.py', 'android_rewrite.py', 'android_exclusive.py', 'android_instruction.py')})
     model = dict(schema=1, build=BUILD, program_id=PROGRAM_ID, rtld=facts['rtld'], sources=audit['sources'],
         modules=modules, source_audit=audit, source_audit_sha256=sha(canonical(audit)), import_manifest_sha256=sha(raw))
     model['content'] = verify_content(content, modules, model['import_manifest_sha256'])

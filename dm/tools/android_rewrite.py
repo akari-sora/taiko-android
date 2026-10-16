@@ -127,6 +127,7 @@ class Image:
     package_version: int = 1
     checked_stack: bool = False
     checked_calls: tuple = ()
+    checked_call_forests: tuple = ()
 
     def metadata(self):
         result = {'target': self.target, 'abi': self.abi, 'size': len(self.bytes),
@@ -146,6 +147,8 @@ class Image:
         if self.checked_calls:
             result['checked_calls'] = [dict(offset=pc, target=target, rule='virtual-x18-exact-target-direct-call-v1')
                                        for pc, target in self.checked_calls]
+        if self.checked_call_forests:
+            result['checked_call_forests'] = [dict(item) for item in self.checked_call_forests]
         return result
 
     def validate(self):
@@ -559,7 +562,102 @@ def _nonself_sub_inline_halfword(ins, by_pc, entries, guarded):
                 entry_policy='nonself-sub-inline-mov-must-pass-runtime-load-guard-v1')
 
 
-def x18_jump_table(ins, by_pc, entries, raw, readonly_ranges, *, root_entries=None):
+def signed_relative_x18_table(ins, by_pc, entries, raw, readonly_ranges, *,
+                              text_size=None, protected_ranges=(), root_entries=None):
+    """A bounded signed32 table aliases virtual X18's index/offset/target.
+
+    Constructor candidates supply only the expected RO base. A loop may skip
+    them: the emitted load guard checks the actual base and full64 virtual
+    index, and the final jump separately checks exact derived case addresses.
+    """
+    def value(pc):
+        op=by_pc.get(pc)
+        return None if op is None else struct.unpack('<I',op.bytes)[0]
+    branch=ins.address;load=branch-8
+    if text_size is None or value(branch)!=0xD61F0240:
+        return None
+    loaded=value(load)
+    if loaded is None:
+        return None
+    table_register=loaded>>5&31
+    if (table_register in (18,29,30,31) or loaded!=0xB8B27812|(table_register<<5) or
+            value(load+4)!=0x8B000252|(table_register<<16)):
+        return None
+    definition,side,masked,compare,guard=(by_pc.get(load-d) for d in (20,16,12,8,4))
+    if any(op is None for op in (definition,side,masked,compare,guard)):
+        return None
+    producer=value(load-20);source=producer>>5&31;shift=producer>>16&31
+    if (producer&~((31<<16)|(31<<5))!=0x53007C12 or not 0<shift<32 or
+            source in (table_register,18,29,30,31) or side.mnemonic!='ubfx' or
+            value(load-16)>>5&31!=source or value(load-16)&31 in (source,table_register,18,29,30,31) or
+            value(load-12)!=0x12000000|(source<<5)|source or
+            value(load-8)&0xFFC003FF!=0x7100025F or value(load-4)&0xFF00001F!=0x54000008 or
+            load-4<guard.operands[-1].imm<=branch):
+        return None
+    bound=value(load-8)>>10&4095
+    if bound>63 or ({load+4,branch} & (set(entries)|set(root_entries or ()))):
+        return None
+    size=4*(bound+1);candidates=[];constructor_block=[]
+    # Only this contiguous pre-index block supplies constructor candidates.
+    # An earlier table used on a different branch must not compete merely
+    # because it lies within 512 bytes. A loop may enter this block later;
+    # no dominance claim follows, and its actual Xtable is checked at read.
+    for at in range(load-24,max(-1,load-516),-4):
+        op=by_pc.get(at)
+        if (op is None or is_fatal_instruction(op) or op.mnemonic in ('svc','hvc','smc') or
+                any(op.group(group) for group in (CS_GRP_JUMP,CS_GRP_CALL,CS_GRP_RET))):
+            break
+        constructor_block.append(at)
+    for at in reversed(constructor_block):
+        addition=value(at)
+        if addition is None or addition&0xFFC003FF!=0x91000000|(table_register<<5)|table_register:
+            continue
+        for pc in range(at-4,max(-1,at-36),-4):
+            op=by_pc.get(pc)
+            if (op is None or is_fatal_instruction(op) or op.mnemonic in ('svc','hvc','smc') or
+                    any(op.group(group) for group in (CS_GRP_JUMP,CS_GRP_CALL,CS_GRP_RET))):
+                break
+            written={op.reg_name(r).replace('w','x',1) for r in op.regs_access()[1]}
+            if 'x'+str(table_register) in written:
+                if op.mnemonic=='adrp' and value(pc)&31==table_register:
+                    table=op.operands[-1].imm+(addition>>10&4095)
+                    if table%4==0 and any(a<=table and table+size<=b for a,b in readonly_ranges):
+                        candidates.append((pc,at,table))
+                break
+            if has18(op) or written&{'sp','xsp'}:
+                break
+    if not candidates or len({row[2] for row in candidates})!=1:
+        return None
+    page,addition,table=candidates[-1];data=raw[table:table+size]
+    if len(data)!=size:
+        return None
+    offsets=struct.unpack('<'+str(bound+1)+'i',data)
+    targets=sorted({table+offset for offset in offsets})
+    if any(offset%4 for offset in offsets) or any(target<=0 or target%4 or target+4>text_size or
+            any(a<target+4 and target<b for a,b in protected_ranges) for target in targets):
+        return None
+    if any(target in (load+4,branch) for target in targets):
+        return None
+    return dict(offset=branch,base=table,count=bound+1,target_values=sorted({offset//4 for offset in offsets}),
+                target_offsets=targets,signed_offsets=list(offsets),signed_relative=True,
+                target_register=18,virtual_target_register=18,index_register=18,loaded_register=18,
+                table_register=table_register,index_bound=bound,table_offset=table,table_bytes=size,
+                table_sha256=hashlib.sha256(data).hexdigest(),load_offset=load,
+                compare_offset=load-8,guard_offset=load-4,index_definition_offset=load-20,
+                index_source_register=source,index_shift=shift,
+                proof_start_offset=load-20,producer_offsets=[page,addition,load-20,load,load+4],
+                permitted_source_rewrite_offsets=[load-20,load-8,load,load+4],
+                preserved_source_offsets=[load-16,load-12],
+                entry_policy='actual-table-full64-virtual-index-pre-read-and-exact-target-jump-v1',
+                rule='runtime-virtual-x18-signed32-relative-ro-v1')
+
+
+def x18_jump_table(ins, by_pc, entries, raw, readonly_ranges, *, root_entries=None,
+                   text_size=None, protected_ranges=()):
+    signed=signed_relative_x18_table(ins,by_pc,entries,raw,readonly_ranges,text_size=text_size,
+                                     protected_ranges=protected_ranges,root_entries=root_entries)
+    if signed is not None:
+        return signed
     precise=halfword_jump_table(ins,by_pc,entries,raw,readonly_ranges,root_entries=root_entries)
     if precise is not None:
         return precise
@@ -1121,7 +1219,11 @@ def _virtual_loaded_x18_native_target(ins, by_pc, entries, raw, readonly_ranges)
             word_!=(0x78607812 if width==2 else 0x38606812)|(index<<16)|(table_register<<5) or
             suffix and (width!=1 or reg in (table_register,index))):
         return None
-    compare,guard,address=(by_pc.get(load-distance) for distance in (12,8,4))
+    page_op=by_pc.get(load-12);inline_add=value(load-8)
+    inline=(width==2 and page_op is not None and page_op.mnemonic=='adrp' and
+            value(load-12)&31==table_register and inline_add is not None and
+            inline_add&0xFFC003FF==0x91000000|(table_register<<5)|table_register)
+    compare,guard,address=(by_pc.get(load-distance) for distance in ((20,16,4) if inline else (12,8,4)))
     if (any(op is None for op in (compare,guard,address)) or
             # Only the W/X width bit may differ. The live load guard still
             # checks all 64 index bits, including entries after this compare.
@@ -1131,11 +1233,17 @@ def _virtual_loaded_x18_native_target(ins, by_pc, entries, raw, readonly_ranges)
         return None
     base=address.operands[1].imm;bound=value(compare.address)>>10&4095
     preload={address.address,load}
+    if inline:
+        if base!=ins.address+4:
+            return None
+        preload.update((load-12,load-8))
     if (base%4 or base not in by_pc or not (base<compare.address or base==ins.address+4) or bound>63 or
             any(pc in entries and pc not in preload for pc in range(compare.address+4,ins.address+4,4))):
         return None
     candidates=[]
-    for pc in range(max(0,compare.address-512),compare.address,4):
+    # The complete inline page/ADD/ADR source owns this table candidate.
+    # Actual table/base/full64 index are still checked before the virtual load.
+    for pc in ((load-12,) if inline else range(max(0,compare.address-512),compare.address,4)):
         page=by_pc.get(pc);add=value(pc+4)
         if (page is not None and page.mnemonic=='adrp' and value(pc)&31==table_register and
                 add is not None and add&0xFFC003FF==0x91000000|(table_register<<5)|table_register):
@@ -1179,6 +1287,69 @@ def _virtual_loaded_x18_native_target(ins, by_pc, entries, raw, readonly_ranges)
                 rule=f'runtime-virtual-loaded-x18-native-target-u{width*8}-ro-lsl2-v1')
 
 
+def virtual_index_x18_native_target(ins, by_pc, entries, raw, readonly_ranges, *, root_entries=None):
+    """Original pointer read, W-copy, then a checked virtual-index u16 table.
+
+    Earlier selected guards may branch straight to the pointer read. Their
+    dominance is not assumed: the load checks live virtual X18 in full64,
+    along with the actual native table and target bases, on every entrance.
+    """
+    def value(pc):
+        op=by_pc.get(pc)
+        return None if op is None else struct.unpack('<I',op.bytes)[0]
+    branch=ins.address;word_=value(branch)
+    if word_ is None or word_&0xFFFFFC1F!=0xD61F0000:
+        return None
+    target=word_>>5&31;load=branch-8;loaded_word=value(load)
+    if loaded_word is None:
+        return None
+    table,loaded=loaded_word>>5&31,loaded_word&31
+    if (len({target,table,loaded})!=3 or any(r in (18,29,30,31) for r in (target,table,loaded)) or
+            loaded_word!=0x78727800|(table<<5)|loaded or
+            value(load+4)!=0x8B000800|(loaded<<16)|(target<<5)|target):
+        return None
+    copied,pointer,compare,guard,page,add,address=(by_pc.get(load-d) for d in (16,20,28,24,12,8,4))
+    if any(op is None for op in (copied,pointer,compare,guard,page,add,address)):
+        return None
+    alias=value(copied.address)>>16&31;side=value(pointer.address)&31
+    if (len({target,table,loaded,alias,side})!=5 or
+            any(r in (18,29,30,31) for r in (alias,side)) or
+            value(copied.address)!=0x2A0003F2|(alias<<16) or
+            value(pointer.address)!=0x39400240|side or
+            value(compare.address)&0xFFC003FF!=0x7100001F|(alias<<5) or
+            value(guard.address)&0xFF00001F!=0x54000008 or
+            guard.address<guard.operands[-1].imm<=branch or
+            page.mnemonic!='adrp' or value(page.address)&31!=table or
+            value(add.address)&0xFFC003FF!=0x91000000|(table<<5)|table or
+            address.mnemonic!='adr' or value(address.address)&31!=target or
+            address.operands[-1].imm!=branch+4 or branch+4 not in by_pc):
+        return None
+    bound=value(compare.address)>>10&4095;preload=set(range(load-20,load+4,4))
+    all_entries=set(entries)|set(root_entries or ())
+    if bound>63 or any(pc in all_entries and pc not in preload for pc in range(compare.address+4,branch+4,4)):
+        return None
+    table_offset=page.operands[-1].imm+(value(add.address)>>10&4095);size=2*(bound+1)
+    if table_offset%2 or not any(a<=table_offset and table_offset+size<=b for a,b in readonly_ranges):
+        return None
+    data=raw[table_offset:table_offset+size]
+    if len(data)!=size:
+        return None
+    values=sorted(set(struct.unpack('<'+str(bound+1)+'H',data)))
+    if values[-1]>4095:
+        return None
+    return dict(offset=branch,base=branch+4,target_register=target,table_register=table,
+                loaded_register=loaded,index_register=18,virtual_index_register=18,index_bound=bound,
+                index_alias_source_register=alias,zero_extend_offset=copied.address,
+                pointer_read_offset=pointer.address,pointer_read_result_register=side,
+                table_offset=table_offset,table_bytes=size,table_sha256=hashlib.sha256(data).hexdigest(),
+                target_values=values,load_offset=load,compare_offset=compare.address,guard_offset=guard.address,
+                proof_start_offset=compare.address,producer_offsets=[copied.address,page.address,add.address,address.address,load,load+4],
+                permitted_source_rewrite_offsets=[pointer.address,copied.address,load],
+                preserved_source_offsets=[pointer.address,copied.address],guarded_preload_entry_offsets=sorted(preload),
+                entry_policy='actual-table-target-base-full64-virtual-index-before-original-read-v1',
+                rule='runtime-virtual-index-x18-native-target-u16-ro-wcopy-pointer-read-v1')
+
+
 def _virtual_table_x18_native_target(ins, by_pc, entries, raw, readonly_ranges):
     """Inline or hoisted RO tables use virtual X18 and a native branch target.
 
@@ -1192,7 +1363,7 @@ def _virtual_table_x18_native_target(ins, by_pc, entries, raw, readonly_ranges):
     if word_&0xFFFFFC1F!=0xD61F0000 or target in (18,29,30,31):
         return None
     addition=None
-    for pc in (ins.address-4,ins.address-8):
+    for pc in (ins.address-4,ins.address-8,ins.address-12):
         candidate=value(pc)
         if candidate is not None and candidate&~(31<<16)==0x8B000800|(target<<5)|target:
             addition=pc;break
@@ -1206,8 +1377,20 @@ def _virtual_table_x18_native_target(ins, by_pc, entries, raw, readonly_ranges):
     if (len({target,loaded,index})!=3 or any(r in (18,29,30,31) for r in (loaded,index)) or
             load_word!=(0x78607A40 if width==2 else 0x38606A40)|(index<<16)|loaded):
         return None
-    suffix=[]
-    if addition!=ins.address-4:
+    suffix=[];copied_suffix=addition==ins.address-12;alias=None
+    if copied_suffix:
+        copied,immediate,virtual_copy=value(load-8),value(load+8),value(load+12)
+        if any(op is None for op in (copied,immediate,virtual_copy)):
+            return None
+        alias=copied>>16&31;ordinary=immediate&31
+        if (width!=1 or alias in (target,loaded,index,18,29,30,31) or
+                copied!=0x2A0003E0|(alias<<16)|index or
+                immediate&~(0xFFFF<<5)!=0x52800000|ordinary or
+                ordinary in (target,loaded,index,alias,18,29,30,31) or
+                virtual_copy!=0x2A0003F2|(alias<<16)):
+            return None
+        suffix=[load+8,load+12]
+    elif addition!=ins.address-4:
         op=by_pc.get(ins.address-4);candidate=value(ins.address-4)
         # SDK preserves one original ordinary-GPR SUB #2 after its target ADD.
         if (width!=2 or candidate is None or candidate&0xFFFFFC00!=0xD1000800 or
@@ -1215,21 +1398,30 @@ def _virtual_table_x18_native_target(ins, by_pc, entries, raw, readonly_ranges):
                 candidate>>5&31 in (18,29,30,31)):
             return None
         suffix=[op.address]
-    address,page,add=(by_pc.get(load-distance) for distance in (4,12,8))
+    address,page,add=(by_pc.get(load-distance) for distance in ((4,16,12) if copied_suffix else (4,12,8)))
     if (address is None or address.mnemonic!='adr' or value(load-4)&31!=target or
             address.operands[1].imm!=ins.address+4 or address.operands[1].imm not in by_pc):
         return None
-    inline=(page is not None and add is not None and page.mnemonic=='adrp' and value(load-12)&31==18 and
-            value(load-8)&0xFFC003FF==0x91000252)
+    inline=(page is not None and add is not None and page.mnemonic=='adrp' and value(page.address)&31==18 and
+            value(add.address)&0xFFC003FF==0x91000252)
+    if copied_suffix and not inline:
+        return None
     compare=guard=None;side=[]
-    for distance in ((20,24) if inline else (12,)):
+    for distance in ((28,) if copied_suffix else (20,24) if inline else (12,)):
         candidate,conditional=by_pc.get(load-distance),by_pc.get(load-distance+4)
         if (candidate is None or conditional is None or
-                value(candidate.address)&0xFFC003FF!=0x7100001F|(index<<5) or
+                value(candidate.address)&0xFFC003FF!=0x7100001F|((alias if copied_suffix else index)<<5) or
                 value(conditional.address)&0xFF00001F!=0x54000008 or
                 conditional.address<conditional.operands[0].imm<=ins.address):
             continue
-        if distance==24:
+        if copied_suffix:
+            side_word=value(load-20)
+            if (side_word is None or side_word&0xFFC00000!=0xB9400000 or
+                    side_word&31 in (target,loaded,index,alias,ordinary,18,29,30,31) or
+                    side_word>>5&31 in (18,29,30,31)):
+                continue
+            side=[load-20]
+        elif distance==24:
             side_word=value(load-16)
             if (width!=1 or side_word is None or side_word&0xFFFFFC00!=0xB9405000 or
                     side_word&31 in (target,loaded,index,18,29,30,31) or
@@ -1240,7 +1432,7 @@ def _virtual_table_x18_native_target(ins, by_pc, entries, raw, readonly_ranges):
     if compare is None:
         return None
     bound=value(compare.address)>>10&4095
-    preload=set(range(load-12,load+4,4)) if inline else {load-4,load}
+    preload=set(range(load-(16 if copied_suffix else 12),load+4,4)) if inline else {load-4,load}
     if bound>63 or any(pc in entries and pc not in preload for pc in range(compare.address+4,ins.address+4,4)):
         return None
     size=width*(bound+1)
@@ -1273,11 +1465,14 @@ def _virtual_table_x18_native_target(ins, by_pc, entries, raw, readonly_ranges):
                 loaded_register=loaded,index_bound=bound,table_offset=table,table_bytes=size,
                 table_sha256=hashlib.sha256(data).hexdigest(),target_values=values,
                 compare_offset=compare.address,guard_offset=guard.address,proof_start_offset=compare.address,
-                producer_offsets=[page.address,add.address,address.address,load,addition],
-                permitted_source_rewrite_offsets=[page.address,add.address,load] if inline else [load],
+                producer_offsets=[page.address,add.address,*([load-8] if copied_suffix else []),address.address,load,addition],
+                permitted_source_rewrite_offsets=([page.address,add.address,load] if inline else [load])+([load+12] if copied_suffix else []),
                 guarded_preload_entry_offsets=sorted(preload),preserved_source_offsets=side+suffix,
                 entry_policy='inline-virtual-table-must-pass-runtime-guard-v1',
-                rule=f'runtime-virtual-table-x18-native-target-u{width*8}-ro-'+('' if inline else 'hoisted-')+'lsl2-v1')
+                **(dict(index_alias_source_register=alias,zero_extend_offset=load-8,
+                        virtual_suffix_copy_offset=load+12) if copied_suffix else {}),
+                rule=f'runtime-virtual-table-x18-native-target-u{width*8}-ro-'+
+                     ('copied-index-suffix-' if copied_suffix else '' if inline else 'hoisted-')+'lsl2-v1')
 
 
 def _scheduled_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges):
@@ -1293,7 +1488,8 @@ def _scheduled_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges):
                                 ('backward-store',2,12),('zero-halfword',2,12),('self-copy-halfword',2,8),
                                 ('pair-byte',1,12),('save-target-halfword',2,8),('loop-byte',1,16),
                                 ('side-copy-halfword',2,8),('mask-back-byte',1,8),
-                                ('mask-alias-byte',1,8),('mask-alias-halfword',2,8)):
+                                ('mask-alias-byte',1,8),('mask-alias-halfword',2,8),
+                                ('backward-alu-byte',1,12)):
         load=branch-distance;word_=value(load);addition=load+4
         if word_ is None or value(addition) is None:
             continue
@@ -1399,6 +1595,29 @@ def _scheduled_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges):
                     move&31 in (*roles,18,29,30,31)):
                 continue
             preserved=[load-8];prior_table=True
+        elif kind=='backward-alu-byte':
+            compare,guard=load-28,load-24
+            first,second,third,fourth=(value(load-distance) for distance in (20,16,12,8))
+            suffix=value(load+8)
+            if any(op is None for op in (first,second,third,fourth,suffix)):
+                continue
+            parallel,parallel_base,side=second&31,second>>5&31,second>>16&31
+            load_base,term,multiplier=first>>5&31,third>>16&31,fourth>>16&31
+            register_mask=(31<<16)|(31<<5)|31
+            if (parallel==side or any(r in (*roles,18,29,30,31) for r in (parallel,side)) or
+                    any(r in (18,29,30,31) for r in (load_base,parallel_base,term,multiplier)) or
+                    first&0xFFC0001F!=0xF9400000|target or
+                    second&~register_mask!=0x8B000800 or
+                    third!=0x8B000000|(term<<16)|(parallel<<5)|parallel or
+                    fourth!=0x9B000000|(multiplier<<16)|(target<<10)|(side<<5)|side or
+                    suffix&0xFFC003FF!=0x91000000|(side<<5)|side):
+                continue
+            # The temporary target is consumed by MADD before ADR replaces it.
+            # Neither the hoisted table nor the index is modified by this exact
+            # four-op prefix or the post-load side ADD. All effects stay in place;
+            # the existing preflight checks actual table/base/full64 index at LDRB.
+            preserved=[*range(load-20,load-4,4),load+8];prior_table=True
+            extra=dict(table_producer_search_bytes=512)
         elif kind=='loop-byte':
             compare,guard=load-36,load-32
             prefix=[value(pc) for pc in range(load-28,load-4,4)]
@@ -1454,7 +1673,8 @@ def _scheduled_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges):
         if prior_table:
             candidates=[]
             size=width*(bound+1)
-            for pc in range(max(0,compare-256),compare,4):
+            lookback=512 if kind=='backward-alu-byte' else 256
+            for pc in range(max(0,compare-lookback),compare,4):
                 page_op=by_pc.get(pc);add_word=value(pc+4)
                 if (page_op is not None and page_op.mnemonic=='adrp' and value(pc)&31==table_register and
                         add_word is not None and add_word&0xFFC003FF==0x91000000|(table_register<<5)|table_register):
@@ -1644,7 +1864,7 @@ def _reaching_table_candidates(load, register, current_branch, by_pc, candidates
     return sorted(set(reaching))
 
 
-def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *, virtual_table=False, virtual_loaded=False, known_tables=()):
+def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *, virtual_table=False, virtual_loaded=False, known_tables=(), root_entries=None):
     """Normalize native dispatch around the actual checked read, not its prefix.
 
     CMP and ADRP/ADD supply finite candidates only. They do not prove dominance:
@@ -1780,6 +2000,72 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
         bounds=[row for row in bounds if not any(anchor(row)<pc<load for pc in wide_definitions) and
                 not any(anchor(row)<anchor(later) and any(anchor(row)<pc<=anchor(later) for pc in definitions)
                         for later in bounds)]
+    if (not bounds and not (virtual_table or virtual_loaded) and root_entries is not None and
+            any(row[:2]==(load-12,load-8) for row in tables)):
+        # A shared CMP may reach this HI guard through a finite CBZ mode
+        # selection graph. Prove every predecessor preserves index and NZCV;
+        # numerical proximity alone never supplies the missing candidate.
+        guard_pc=load-16;shared_guard=by_pc.get(guard_pc);guard_word=value(guard_pc)
+        if (shared_guard is not None and guard_word is not None and
+                guard_word&0xFF00001F==0x54000008 and
+                not guard_pc<shared_guard.operands[-1].imm<=branch):
+            begin=max(0,guard_pc-512)
+            predecessors={pc:set() for pc in range(begin,guard_pc+4,4) if pc in by_pc}
+            for pc in predecessors:
+                if pc==guard_pc:continue
+                op=by_pc[pc]
+                if is_fatal_instruction(op) or op.group(CS_GRP_RET) or op.mnemonic=='br':
+                    successors=()
+                elif op.mnemonic=='b':
+                    successors=(op.operands[-1].imm,)
+                elif op.mnemonic in ('cbz','cbnz','tbz','tbnz') or op.mnemonic.startswith('b.'):
+                    successors=(op.operands[-1].imm,pc+4)
+                else:
+                    successors=(pc+4,)
+                for destination in successors:
+                    if destination in predecessors:predecessors[destination].add(pc)
+            pending=[guard_pc];seen=set();compares=set();valid=True
+            while pending:
+                pc=pending.pop()
+                if pc in seen:continue
+                seen.add(pc);op=by_pc[pc];word_=value(pc)
+                if len(seen)>16:
+                    valid=False;break
+                if word_&0xFFC003FF==0x7100001F|(index<<5) and word_>>10&4095<=63:
+                    compares.add(pc);continue
+                if (pc in root_entries or pc!=guard_pc and
+                        (op.mnemonic not in ('cbz','cbnz') or word_&31 in (18,29,30,31) or
+                         op.operands[-1].imm<=pc)):
+                    valid=False;break
+                previous=predecessors[pc]
+                if not previous:
+                    valid=False;break
+                pending.extend(previous-seen)
+            if valid and len(compares)==1:
+                shared_compare=next(iter(compares))
+                protected=(seen-compares)|set(range(guard_pc,branch+4,4))
+                valid=not protected.intersection(root_entries)
+                for op in by_pc.values():
+                    if not valid:break
+                    if op.mnemonic in ('b','bl','cbz','cbnz','tbz','tbnz') or op.mnemonic.startswith('b.'):
+                        if op.operands[-1].imm in protected and op.address not in seen:
+                            valid=False
+                    elif op.mnemonic in ('adr','adrp'):
+                        destination=op.operands[1].imm
+                        if destination in protected:valid=False
+                        following=value(op.address+4);register=value(op.address)&31
+                        if (op.mnemonic=='adrp' and following is not None and
+                                following&0xFFC003FF==0x91000000|(register<<5)|register and
+                                destination+(following>>10&4095) in protected):
+                            valid=False
+                for collection in known_tables:
+                    for plan in collection.values():
+                        destinations={plan['base']+tag*4 for tag in plan.get('target_values',range(plan.get('count',0)))}
+                        if protected.intersection(destinations):valid=False
+                if valid:
+                    bounds.append((shared_compare,value(shared_compare)>>10&4095))
+                    bound_details[shared_compare]=dict(bound_candidate_kind='cbz-shared-cmp',
+                        shared_guard_offset=guard_pc,shared_compare_path_offsets=sorted(seen))
     if not bounds:
         return None
     compare,bound=bounds[-1]
@@ -1826,6 +2112,32 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
     # objects; they do not change this core. Entrances at ADR/LDR still check
     # the live table, so this does not borrow constructor dominance.
     inline=[row for row in tables if row[:2]==(load-12,load-8)]
+    local_add=value(load-8)
+    if (not (virtual_table or virtual_loaded) and not bound_details[compare] and
+            guard is not None and value(compare+4)&0xFF00001F==0x54000008 and
+            not compare+4<guard.operands[0].imm<=branch and local_add is not None and
+            local_add&0xFFC003FF==0x91000000|(table_register<<5)|table_register):
+        # The ADD/ADR/LDR core may have a bounded independent schedule
+        # between its own post-guard page and ADD. Validate every word rather
+        # than choosing the closest of unrelated far RO candidates. Entries
+        # before LDR still need the actual live-base/full-index read guard.
+        local_pages=[pc for pc in range(max(compare+8,load-(44 if width==2 else 48)),load-12,4)
+                     if by_pc.get(pc) is not None and by_pc[pc].mnemonic=='adrp' and value(pc)&31==table_register]
+        gapped=[]
+        for page_pc in local_pages:
+            gap=[by_pc.get(pc) for pc in range(page_pc+4,load-8,4)]
+            if any(side is None or is_fatal_instruction(side) or site_kind(side) is not None or side.update_flags or
+                   any(side.group(group) for group in (CS_GRP_JUMP,CS_GRP_CALL,CS_GRP_RET)) or
+                   any(side.reg_name(r) in ('x'+str(table_register),'w'+str(table_register),
+                       'x18','w18','sp','wsp','fp','lr','x29','w29','x30','w30','nzcv')
+                       for r in side.regs_access()[1]) for side in gap):
+                continue
+            table=by_pc[page_pc].operands[1].imm+(local_add>>10&4095)
+            if table%width==0 and any(begin<=table and table+size<=end for begin,end in readonly_ranges):
+                gapped.append((page_pc,load-8,table))
+        if local_pages and not gapped:
+            return None  # A broken local setup cannot borrow another RO object.
+        inline+=gapped
     if (bound_details[compare].get('bound_candidate_kind')=='masked-extraction' and compare==load-8 and
             bound_details[compare]['bound_mask_offset']==load-20):
         inline += [row for row in tables if row[:2]==(load-16,load-12)]
@@ -1878,17 +2190,18 @@ def _guarded_native_readonly_table(ins, by_pc, entries, raw, readonly_ranges, *,
                    dict(permitted_source_rewrite_offsets=[branch-4]) if virtual_mask else {}))
 
 
-def readonly_guest_table(ins, by_pc, entries, raw, readonly_ranges, *, known_tables=()):
+def readonly_guest_table(ins, by_pc, entries, raw, readonly_ranges, *, known_tables=(), root_entries=None):
     return (readonly_guest_byte_table(ins,by_pc,entries,raw,readonly_ranges) or
             runtime_readonly_guest_halfword_table(ins,by_pc,entries,raw,readonly_ranges) or
             runtime_readonly_guest_byte_table(ins,by_pc,entries,raw,readonly_ranges) or
             _observed_runtime_guest_table(ins,by_pc,entries,raw,readonly_ranges) or
             _scheduled_side_load_table(ins,by_pc,entries,raw,readonly_ranges) or
+            virtual_index_x18_native_target(ins,by_pc,entries,raw,readonly_ranges,root_entries=root_entries) or
             _virtual_table_x18_native_target(ins,by_pc,entries,raw,readonly_ranges) or
             _virtual_loaded_x18_native_target(ins,by_pc,entries,raw,readonly_ranges) or
             _scheduled_native_readonly_table(ins,by_pc,entries,raw,readonly_ranges) or
             _assembled_byte_readonly_table(ins,by_pc,entries,raw,readonly_ranges) or
-            _guarded_native_readonly_table(ins,by_pc,entries,raw,readonly_ranges,known_tables=known_tables) or
+            _guarded_native_readonly_table(ins,by_pc,entries,raw,readonly_ranges,known_tables=known_tables,root_entries=root_entries) or
             _guarded_native_readonly_table(ins,by_pc,entries,raw,readonly_ranges,virtual_table=True,known_tables=known_tables) or
             _guarded_native_readonly_table(ins,by_pc,entries,raw,readonly_ranges,virtual_loaded=True,known_tables=known_tables))
 
@@ -2114,7 +2427,96 @@ class Emitter:
         self.emit(0xD4200000)  # Unknown, null and interior targets fail closed.
         self.data[mismatch:mismatch + 4] = word(0x54000001 | ((failure - mismatch) // 4 & 0x7FFFF) << 5)
 
+    def checked_call_forest(self, targets, sites):
+        """One balanced exact-entry decision forest, placed before all stubs.
+
+        Conditional edges are local; every distant child and successful guest
+        transfer uses B's signed 26-bit displacement. No node performs an
+        indirect branch or touches platform X18. See the independent auditor
+        for a second parser of this 60-byte node/28-byte failure wire format.
+        """
+        start = self.pc
+        failure = start + len(targets) * 60
+
+        def direct(target):
+            try:
+                self.emit(branch(self.pc, target))
+            except RewriteError as error:
+                raise RewriteError(f'checked call forest branch range at 0x{self.pc:x} to 0x{target:x}') from error
+
+        def restore(success):
+            self.emit(memory(True, 2, 31, 40))
+            self.emit(0xD51B4202)  # MSR NZCV,X2
+            self.emit(memory(True, 2, 31, 32))
+            self.emit(pair(True, 0, 1, 16))
+            if success:
+                self.emit(memory(True, 16, 31, 0))
+                self.emit(memory(True, 30, 31, 48))
+            else:
+                self.emit(pair(True, 16, 30, 0))
+            self.emit(0x910103FF)  # ADD SP,SP,#64
+
+        def emit_node(lo, hi, index):
+            middle = (lo + hi) // 2
+            target = targets[middle]
+            pc = start + index * 60
+            if self.pc != pc:
+                raise RewriteError('checked call forest node geometry mismatch')
+            pages = (target >> 12) - (pc >> 12)
+            if not -(1 << 20) <= pages < (1 << 20):
+                raise RewriteError('checked call forest address exceeds ADRP range')
+            self.emit(0x90000001 | (pages & 3) << 29 | (pages >> 2 & 0x7FFFF) << 5)
+            self.emit(0x91000021 | (target & 4095) << 10)
+            self.emit(0xEB01001F)  # CMP X0,X1: full 64-bit relocated pointer.
+            self.emit(0x54000080)  # B.EQ node+28, local success restore.
+            self.emit(0x54000043)  # B.LO node+24, local left-child B.
+            right = start + (index + 1 + middle - lo) * 60 if middle + 1 < hi else failure
+            left = start + (index + 1) * 60 if lo < middle else failure
+            direct(right)
+            direct(left)
+            restore(True)
+            direct(target)
+            if lo < middle:
+                emit_node(lo, middle, index + 1)
+            if middle + 1 < hi:
+                emit_node(middle + 1, hi, index + 1 + middle - lo)
+
+        emit_node(0, len(targets), 0)
+        if self.pc != failure:
+            raise RewriteError('checked call forest failure geometry mismatch')
+        restore(False)
+        self.emit(0xD4200000)
+        digest = hashlib.sha256()
+        for target in targets:
+            digest.update(struct.pack('<Q', target))
+        geometry = dict(version=1, start=start, root=start, end=self.pc,
+                        failure_offset=failure, node_size=60, node_count=len(targets),
+                        target_count=len(targets), target_sha256=digest.hexdigest(),
+                        site_offsets=sorted(sites), max_depth=len(targets).bit_length(),
+                        stub_size=60, frame_size=64)
+        self.finish()  # Align/reset helper pools after the large literal-free forest.
+        return geometry
+
+    def checked_call_forest_stub(self, ins, root):
+        scratch, state = self.begin(ins, frame=64)
+        if (scratch, state) != (0, 1):
+            raise RewriteError('checked call forest requires exact BLR X18 scratch layout')
+        self.emit(memory(False, 2, 31, 32))
+        self.emit(0xD53B4202)
+        self.emit(memory(False, 2, 31, 40))
+        self.emit(memory(True, 0, 1, 0))  # Virtual X18 snapshot in X0.
+        continuation = ins.address + 4
+        pages = (continuation >> 12) - (self.pc >> 12)
+        if not -(1 << 20) <= pages < (1 << 20):
+            raise RewriteError('checked call forest continuation exceeds ADRP range')
+        self.emit(0x9000001E | (pages & 3) << 29 | (pages >> 2 & 0x7FFFF) << 5)
+        self.emit(0x910003DE | (continuation & 4095) << 10)
+        self.emit(memory(False, 30, 31, 48))
+        self.emit(branch(self.pc, root))
+
     def byte_jump(self, ins, plan):
+        if plan.get('signed_relative'):
+            return self.signed_relative_x18_jump(ins,plan)
         # Preserve every guest GPR, SP, LR and NZCV. The state accessor also
         # preserves SIMD/FP state and hardware x18. No guest register is dead
         # merely because the original instruction was an indirect branch.
@@ -2153,7 +2555,72 @@ class Emitter:
         delta = table - table_address
         self.data[table_address:table_address + 4] = word(0x10000000 | (delta & 3) << 29 | (delta >> 2 & 0x7FFFF) << 5 | state)
 
+    def signed_relative_x18_jump(self, ins, plan):
+        """Exact finite jump membership, retaining the original LR on both exits."""
+        scratch,state=self.begin(ins,frame=64)
+        third=next(r for r in range(16) if r not in registers(ins)|{scratch,state})
+        self.emit(memory(False,third,31,32));self.emit(0xD53B4200|third)
+        self.emit(memory(False,third,31,40));self.emit(memory(True,scratch,state,0))
+        matches=[]
+        for target in plan['target_offsets']:
+            pages=(target>>12)-(self.pc>>12)
+            if not -(1<<20)<=pages<(1<<20):
+                raise RewriteError('signed relative jump target exceeds ADRP range')
+            self.emit(0x90000000|(pages&3)<<29|(pages>>2&0x7FFFF)<<5|state)
+            self.emit(0x91000000|(target&4095)<<10|state<<5|state)
+            self.emit(0xEB00001F|state<<16|scratch<<5)
+            matches.append((self.pc,target));self.emit(0)
+
+        def restore():
+            self.emit(memory(True,third,31,40));self.emit(0xD51B4200|third)
+            self.emit(memory(True,third,31,32));self.emit(pair(True,scratch,state,16))
+            self.emit(pair(True,16,30,0));self.emit(0x910103FF)
+
+        restore();self.emit(0xD4200000)
+        for at,target in matches:
+            delta=self.pc-at
+            if delta%4 or not -(1<<20)<=delta<(1<<20):
+                raise RewriteError('signed relative membership branch exceeds range')
+            self.data[at:at+4]=word(0x54000000|((delta//4)&0x7FFFF)<<5)
+            restore();self.emit(branch(self.pc,target))
+
+    def signed_relative_x18_load(self, ins, plan):
+        """Read one signed32 offset using an actual checked virtual index."""
+        scratch,state=self.begin(ins,frame=48)
+        third=next(r for r in range(16) if r not in registers(ins)|{scratch,state})
+        self.emit(memory(False,third,31,32));self.emit(0xD53B4200|third)
+        self.emit(memory(False,third,31,40));self.emit(memory(True,scratch,state,0))
+        table=plan['table_offset'];pages=(table>>12)-(self.pc>>12)
+        if not -(1<<20)<=pages<(1<<20):
+            raise RewriteError('signed relative table exceeds ADRP range')
+        self.emit(0x90000000|(pages&3)<<29|(pages>>2&0x7FFFF)<<5|third)
+        self.emit(0x91000000|(table&4095)<<10|third<<5|third)
+        self.emit(0xCB000000|third<<16|plan['table_register']<<5|third)
+        failures=[(self.pc,0xB5000000|third)];self.emit(0)
+        self.emit(0xF100001F|plan['index_bound']<<10|scratch<<5)
+        failures.append((self.pc,0x54000008));self.emit(0)
+        # Rt and Rm both alias virtual X18. A64 computes the address before
+        # replacing the same scratch register with its sign-extended result.
+        self.emit(substitute(ins,scratch));self.emit(memory(False,scratch,state,0))
+
+        def restore():
+            self.emit(memory(True,third,31,40));self.emit(0xD51B4200|third)
+            self.emit(memory(True,third,31,32));self.emit(pair(True,scratch,state,16))
+            self.emit(0x9100C3FF)
+
+        restore();self.emit(branch(self.pc,ins.address+4))
+        failure=self.pc;restore();self.emit(0xD4200000)
+        for at,encoding in failures:
+            delta=failure-at
+            if delta%4 or not -(1<<20)<=delta<(1<<20):
+                raise RewriteError('signed relative load failure branch exceeds range')
+            self.data[at:at+4]=word(encoding|((delta//4)&0x7FFFF)<<5)
+
     def readonly_table_load(self, ins, plan):
+        if plan.get('virtual_index_register')==18:
+            return self.virtual_index_x18_load(ins,plan)
+        if plan.get('signed_relative'):
+            return self.signed_relative_x18_load(ins,plan)
         if plan.get('virtual_target_register')==18:
             return self.virtual_x18_table_load(ins,plan)
         if plan.get('virtual_table_register')==18 or plan.get('virtual_loaded_register')==18:
@@ -2196,6 +2663,39 @@ class Emitter:
             delta=failure-at
             if delta%4 or not -(1<<20)<=delta<(1<<20):
                 raise RewriteError('runtime RO table failure branch exceeds reach')
+            self.data[at:at+4]=word(encoding|((delta//4)&0x7FFFF)<<5)
+
+    def virtual_index_x18_load(self, ins, plan):
+        # The native target is not an LDRH operand, but must survive the helper
+        # and all guard scratch. Virtual X18 is read-only for this instruction.
+        target=plan['target_register'];scratch,state=self.begin(ins,frame=48,reserved=(target,))
+        third=next(r for r in range(16) if r not in registers(ins)|{scratch,state,target})
+        self.emit(memory(False,third,31,32));self.emit(0xD53B4200|third)
+        self.emit(memory(False,third,31,40));self.emit(memory(True,scratch,state,0))
+        failures=[]
+        for actual,expected in ((plan['table_register'],plan['table_offset']),(target,plan['base'])):
+            pages=(expected>>12)-(self.pc>>12)
+            if not -(1<<20)<=pages<(1<<20):
+                raise RewriteError('virtual index table/base exceeds ADRP range')
+            self.emit(0x90000000|(pages&3)<<29|(pages>>2&0x7FFFF)<<5|third)
+            self.emit(0x91000000|(expected&4095)<<10|third<<5|third)
+            self.emit(0xCB000000|third<<16|actual<<5|third)
+            failures.append((self.pc,0xB5000000|third));self.emit(0)
+        self.emit(0xF100001F|plan['index_bound']<<10|scratch<<5)
+        failures.append((self.pc,0x54000008));self.emit(0)
+        self.emit(substitute(ins,scratch))  # Exactly one original-width read.
+
+        def restore():
+            self.emit(memory(True,third,31,40));self.emit(0xD51B4200|third)
+            self.emit(memory(True,third,31,32));self.emit(pair(True,scratch,state,16))
+            self.emit(0x9100C3FF)
+
+        restore();self.emit(branch(self.pc,ins.address+4))
+        failure=self.pc;restore();self.emit(0xD4200000)
+        for at,encoding in failures:
+            delta=failure-at
+            if delta%4 or not -(1<<20)<=delta<(1<<20):
+                raise RewriteError('virtual index load failure branch exceeds range')
             self.data[at:at+4]=word(encoding|((delta//4)&0x7FFFF)<<5)
 
     def virtual_x18_table_load(self, ins, plan):
@@ -2449,7 +2949,8 @@ class Emitter:
 
 def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offset=None, entry_offsets=None, profile=None,
             indirect_policy='strict', package_version=1, guarded_indirect_offsets=(), checked_stack=False,
-            readonly_ranges=(), proven_guest_indirect_offsets=(), checked_call_targets=None):
+            readonly_ranges=(), proven_guest_indirect_offsets=(), checked_call_targets=None,
+            checked_call_forest_offsets=(), checked_call_forest_targets=(), independent_entry_offsets=None):
     """Rewrite selected ARM64 code while preserving all other raw image bytes.
 
     Ranges are image-relative, half-open (start, end) pairs within text_size.
@@ -2482,12 +2983,23 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
     if checked_call_targets is not None and not isinstance(checked_call_targets, Mapping):
         raise RewriteError('checked call targets must be an explicit mapping')
     checked_calls = dict(checked_call_targets or {})
+    forest_sites = set(checked_call_forest_offsets)
+    forest_targets = tuple(checked_call_forest_targets)
+    if bool(forest_sites) != bool(forest_targets):
+        raise RewriteError('checked call forest requires both source sites and targets')
+    if forest_sites and (not checked_stack or package_version != 2 or
+                         forest_sites & (guarded | checked_calls.keys())):
+        raise RewriteError('checked call forest requires checked v2 and disjoint source sites')
+    if (any(type(pc) is not int for pc in forest_sites) or
+            any(type(pc) is not int or pc <= 0 or pc % 4 for pc in forest_targets) or
+            any(a >= b for a, b in zip(forest_targets, forest_targets[1:]))):
+        raise RewriteError('checked call forest requires sorted unique aligned integer targets')
     if checked_calls and (not checked_stack or package_version != 2 or checked_calls.keys() & guarded):
         raise RewriteError('checked calls require checked v2 mode and cannot be host gates')
     if any(type(pc) is not int or type(target) is not int for pc, target in checked_calls.items()):
         raise RewriteError('checked call offsets and targets must be integers')
     guest_tables=set(proven_guest_indirect_offsets)
-    if checked_calls.keys() & guest_tables:
+    if (checked_calls.keys() | forest_sites) & guest_tables:
         raise RewriteError('checked calls cannot overlap guest table transfers')
     if guest_tables and (not checked_stack or guest_tables&guarded):
         raise RewriteError('proven guest tables require checked mode and cannot be host gates')
@@ -2551,11 +3063,26 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
     roots = {entry_offset} if entry_offsets is None else {entry_offset, *entry_offsets}
     if any(not isinstance(root, int) or root not in by_pc for root in roots):
         raise RewriteError('entry root outside selected code')
+    if independent_entry_offsets is None:
+        independent_roots=set(roots)
+    else:
+        try:
+            independent_roots={entry_offset,*independent_entry_offsets}
+        except TypeError as error:
+            raise RewriteError('invalid independent entry roots') from error
+        if any(type(root) is not int for root in independent_roots) or not independent_roots<=roots:
+            raise RewriteError('independent entry roots must be selected declared entries')
     for pc, target in checked_calls.items():
         if (pc not in by_pc or struct.unpack('<I', by_pc[pc].bytes)[0] != 0xD63F0240 or
-                target not in by_pc or target not in roots or target in (pc, pc + 4)):
-            raise RewriteError('checked call requires exact BLR X18 and a distinct selected entry root')
+                target not in by_pc or target not in independent_roots or target in (pc, pc + 4)):
+            raise RewriteError('checked call requires exact BLR X18 and a distinct independent selected entry root')
         kinds[pc] = 'checked_call'
+    if any(target not in by_pc or target not in independent_roots for target in forest_targets):
+        raise RewriteError('checked call forest target is not an independent selected source entry root')
+    for pc in forest_sites:
+        if pc not in by_pc or struct.unpack('<I', by_pc[pc].bytes)[0] != 0xD63F0240:
+            raise RewriteError('checked call forest requires exact original BLR X18')
+        kinds[pc] = 'checked_call_forest_stub'
     byte_jumps = {}
     native_tables={}
     producer_entries = roots | direct_entries
@@ -2563,7 +3090,7 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
         for ins in instructions:
             if struct.unpack('<I', ins.bytes)[0] != 0xD61F0240:
                 continue
-            plan = x18_jump_table(ins,by_pc,producer_entries,raw,readonly_ranges,root_entries=roots)
+            plan = x18_jump_table(ins,by_pc,producer_entries,raw,readonly_ranges,root_entries=roots,text_size=text_size)
             if plan is None:
                 raise RewriteError(f'0x{ins.address:x}: unproven byte dispatch br x18')
             targets = {plan['base']+value*4 for value in plan.get('target_values',range(plan['count']))}
@@ -2580,7 +3107,7 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
                 if pc not in by_pc:
                     raise RewriteError('proven guest table outside selected code')
                 plan=readonly_guest_table(by_pc[pc],by_pc,producer_entries,raw,readonly_ranges,
-                                          known_tables=(byte_jumps,native_tables))
+                                          known_tables=(byte_jumps,native_tables),root_entries=independent_roots)
                 if plan is None:
                     continue
                 targets={plan['base']+value*4 for value in plan['target_values']}
@@ -2593,11 +3120,11 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
                 raise RewriteError(f'0x{min(pending_tables):x}: unproven read-only guest table')
         # Added target entries must not invalidate another producer's proof.
         for pc, plan in byte_jumps.items():
-            if x18_jump_table(by_pc[pc],by_pc,producer_entries,raw,readonly_ranges,root_entries=roots)!=plan:
+            if x18_jump_table(by_pc[pc],by_pc,producer_entries,raw,readonly_ranges,root_entries=roots,text_size=text_size)!=plan:
                 raise RewriteError(f'0x{pc:x}: byte dispatch target enters a producer')
         for pc,plan in native_tables.items():
             if readonly_guest_table(by_pc[pc],by_pc,producer_entries,raw,readonly_ranges,
-                                    known_tables=(byte_jumps,native_tables))!=plan:
+                                    known_tables=(byte_jumps,native_tables),root_entries=independent_roots)!=plan:
                 raise RewriteError(f'0x{pc:x}: guest table target enters a producer')
     all_tables=[*native_tables.values(),*byte_jumps.values()]
     table_loads={plan['load_offset']:plan for plan in all_tables if 'load_offset' in plan}
@@ -2612,7 +3139,7 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
             raise RewriteError('runtime guest table overlaps another source rewrite')
         kinds[pc]='readonly_table_load'
     observations, parameters = android_observation.plan(profile, by_pc, kinds, roots, sys.modules[__name__])
-    if checked_calls.keys() & (observations.keys() | parameters.keys() | {p.b for p in parameters.values()}):
+    if (checked_calls.keys() | forest_sites) & (observations.keys() | parameters.keys() | {p.b for p in parameters.values()}):
         raise RewriteError('checked calls cannot overlap profile/parameter rewrites')
     for plan in table_loads.values():
         window=set(range(plan.get('proof_start_offset',plan.get('zero_extend_offset')),plan['offset']+4,4))
@@ -2629,6 +3156,7 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
     if any(region_words & set(range(p.get('proof_start_offset',p.get('zero_extend_offset')),p['offset']+4,4)) for p in table_loads.values()):
         raise RewriteError('runtime guest table overlaps exclusive region')
     emitter = Emitter(raw + b'\0' * (patch_offset - len(raw)))
+    forest = emitter.checked_call_forest(forest_targets, forest_sites) if forest_sites else None
     for ins in instructions:
         kind = kinds[ins.address]
         if kind == 'parameter_tail':
@@ -2644,7 +3172,9 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
         if emitter.pc - emitter.pool_start >= HELPER_POOL_CHUNK:
             emitter.finish()
         start = emitter.pc
-        if ins.address in checked_calls:
+        if ins.address in forest_sites:
+            emitter.checked_call_forest_stub(ins, forest['root'])
+        elif ins.address in checked_calls:
             emitter.checked_call(ins, checked_calls[ins.address])
         elif kind == 'stack_check':
             emitter.gate(ins, stack_check=True)
@@ -2661,13 +3191,20 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
         else:
             getattr(emitter, kind)(ins)
         emitter.sites.append(Site(ins.address, start, f'{ins.mnemonic} {ins.op_str}'))
-        emitter.data[ins.address:ins.address + 4] = word(branch(ins.address, start))
+        try:
+            source_branch = branch(ins.address, start)
+        except RewriteError as error:
+            if forest is not None:
+                raise RewriteError(f'post-forest source trampoline branch range at 0x{ins.address:x} to 0x{start:x}') from error
+            raise
+        emitter.data[ins.address:ins.address + 4] = word(source_branch)
     emitter.finish()
     return Image(bytes(emitter.data), entry_offset, tuple(emitter.fixups), tuple(emitter.gates), tuple(emitter.sites),
                  profile=profile, gate_provenance=tuple(emitter.gate_provenance),
                  parameters=tuple(profile.parameters) if profile is not None else (),
                  indirect_policy=indirect_policy, package_version=package_version, checked_stack=checked_stack,
-                 checked_calls=tuple(sorted(checked_calls.items()))).validate()
+                 checked_calls=tuple(sorted(checked_calls.items())),
+                 checked_call_forests=(forest,) if forest is not None else ()).validate()
 
 
 def main():
