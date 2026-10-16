@@ -4,6 +4,21 @@
 #include <cstdlib>
 #include <sys/mman.h>
 #include <unistd.h>
+#if defined(__linux__) && defined(__aarch64__)
+#include <sys/auxv.h>
+#include <asm/hwcap.h>
+#endif
+
+namespace dm_android {
+bool native_wait_event_stream_available() {
+#if defined(__linux__) && defined(__aarch64__)
+    static_assert(HWCAP_EVTSTRM==(1ul<<2));
+    return native_wait_event_stream_capable(getauxval(AT_HWCAP));
+#else
+    return false;
+#endif
+}
+}
 
 namespace {
 // A signal can arrive while running on a small SDK stack. Install a distinct

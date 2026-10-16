@@ -4,6 +4,7 @@
 #include "taiko_resources.h"
 #include "guest_bootstrap.h"
 #include "kernel_runtime.h"
+#include "kernel_thread_adapter.h"
 #include "graphics_platform.h"
 #include "graphics_surface.h"
 #include "oe_platform.h"
@@ -267,6 +268,12 @@ std::string run_original_entry(const std::string& files,const std::string& local
         if(!Attempt::attachment(state->runtime.process(),state->guest.state,state,&error))
             throw std::runtime_error(error);
         const BootstrapHooks hooks{Attempt::registration,Attempt::attachment,state,Attempt::observe,state};
+        // This exact original SDK retains native WFE in LockBusyMutex. Require
+        // the process's periodic event-stream capability before SDK execution;
+        // occasional interrupts or a previous microbenchmark do not prove it.
+        state->last_step="pre_bootstrap_native_wait";
+        if(!native_wait_event_stream_available())
+            throw std::runtime_error("original SDK native WFE requires Linux arm64 HWCAP_EVTSTRM");
         const bool ran=state->bootstrap.run(state->runtime.process(),state->guest,state->stack,state->arguments,hooks,&state->result,&error);
         status=ran?(state->result.main_result.exited?"NNMAIN_EXITED":"NNMAIN_RETURNED"):"STOPPED";
         if(!ran && error.empty())error="original bootstrap stopped without a returned success";

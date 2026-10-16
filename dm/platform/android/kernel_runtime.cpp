@@ -1,4 +1,5 @@
 #include "kernel_runtime.h"
+#include "kernel_thread_adapter.h"
 #include "kernel_platform.h"
 #include "service_platform.h"
 #include "fs_platform.h"
@@ -43,6 +44,7 @@ thread_local dm_android::HleRuntime* invoking_runtime=nullptr;
 thread_local unsigned observation_depth=0;
 thread_local unsigned oe_hook_depth=0;
 thread_local unsigned graphics_callback_depth=0;
+thread_local dm_android::NativeWaitState native_wait_state;
 std::atomic<uint64_t> profile_ns[PROF_N]{}, profile_bytes[PROF_N]{};
 std::atomic<uint64_t> frame_progress{0};
 bool fail(std::string* error, const char* message) {
@@ -250,6 +252,9 @@ void HleRuntime::configure(DmGuestThreadState& state) {
     state.invocation_leave = invocation_leave;
     state.invocation_context = this;
     state.runtime_generation = process_.load_generation();
+    // A legacy diagnostic may not own a GuestEnvironment. It gains no SVC36
+    // authority; bind failure revokes any previous view and dispatch refuses.
+    native_wait_state.bind(state,state.runtime_generation);
     if(needs_parameters_) { std::memcpy(state.parameters,parameter_seed_,sizeof(parameter_seed_));state.parameter_valid_mask=15; }
     else { std::memset(state.parameters,0,sizeof(state.parameters));state.parameter_valid_mask=0; }
 }
@@ -343,6 +348,21 @@ void HleRuntime::dispatch(DmGuestThreadState* state, DmGuestRegisterFrame* frame
             std::fputs("Android guarded host transfer lacks exact live authority\n",stderr);std::abort();
         }
     } else if (gate->kind == DM_GUEST_SVC) {
+        if(gate->argument==0x36) {
+            auto* runtime=static_cast<HleRuntime*>(state->user_data);
+            // The owned host invocation pins runtime and environment lifetime.
+            // Full-frame preservation here is our adapter contract; SVC36 is
+            // void and must never pass through the Result-writing fallback.
+            if(!runtime || invoking_runtime!=runtime || dm_android_peek_guest_state()!=state ||
+               !dm_android_stack_dispatch_context(state) ||
+               state->runtime_generation!=runtime->process_.load_generation() ||
+               !native_wait_state.synchronize(*state,runtime->process_.load_generation())) {
+                std::fputs("Android SVC36 requires current owned unpinned TLR with zero interrupt flag\n",stderr);
+                std::abort();
+            }
+            runtime->count_svc(0x36);
+            return;
+        }
         if((observation_depth || oe_hook_depth || graphics_callback_depth) && gate->argument==0x0a) {
             std::fputs("Android observers must return normally; ExitThread is refused\n",stderr);std::abort();
         }
