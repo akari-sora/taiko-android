@@ -46,11 +46,14 @@ bool original_bringup_graph(const Process& process,std::string* error){
         const auto& pin=pins->modules[i];const auto& source=pins->sources[i];
         LoadedPackageAuthority facts{};
         if(!process.loaded_package_authority(i,&facts) || !facts.checked_stack || !facts.callback_audited ||
+           facts.guest_contract_admitted || facts.exact_guest_count || facts.returning_retire_count ||
+           (facts.required_flags&(DM_MODULE_REQUIRE_EXACT_GUEST_V1|DM_MODULE_REQUIRE_RETURNING_RETIRE_V1)) ||
            facts.capsule_sha256!=pin.package_sha256 || facts.capsule_bytes!=pin.package_bytes ||
            p.name!=pin.name || p.wire_version!=2 || p.profile_class || p.profile ||
            p.build_id!=source.build_id || p.source_sha256!=source.source_sha256 ||
            p.image_sha256!=pin.image_sha256 || p.bytes.size()!=pin.image_bytes ||
-           !p.parameters.empty())return fail(error,"original bringup frozen capsule/source/stack/callback identity mismatch");
+           !p.parameters.empty() || !p.exact_guest_records.empty() || !p.returning_retire_records.empty())
+            return fail(error,"original bringup frozen capsule/source/stack/callback identity mismatch");
         for(const auto& g:p.gates)
             if(g.kind==DM_GUEST_OBSERVATION || (g.kind==DM_GUEST_SVC && g.argument>=0x80))
                 return fail(error,"stock original bringup cannot carry product OBS or private CUTS");

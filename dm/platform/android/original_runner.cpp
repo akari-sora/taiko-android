@@ -126,8 +126,15 @@ bool read_capsule(int parent,const EntryModulePin& pin,std::unique_ptr<ModulePac
         return fail(error,"original capsule changed during read: "+name);
     // The compiled audit and whole-file digest are independent of these bytes.
     // The same decoder used by existing checked modules grants every admission.
+#if defined(DM_TARGET_TAIKO) && DM_TARGET_TAIKO
+    const TrustedGuestContractAuditV1* contract_audit =
+        (pin.exact_guest_count || pin.returning_retire_count) ? &pin.guest_contract_audit : nullptr;
+    return decode_package_with_audits(bytes.data(),bytes.size(),pin.package_sha256.data(),
+                                      &pin.callback_audit,contract_audit,output,error,limits);
+#else
     return decode_package_with_callback_audit(bytes.data(),bytes.size(),pin.package_sha256.data(),
                                               pin.callback_audit,output,error,limits);
+#endif
 }
 struct Attempt {
     // Environment outlives every runtime/guest owner, including retained work.

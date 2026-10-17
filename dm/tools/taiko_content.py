@@ -108,10 +108,10 @@ def load_receipt(capsules):
     except (ValueError, UnicodeError) as error:
         raise ContentError('invalid import receipt') from error
     require(isinstance(receipt, dict) and receipt.get('status') == 'prepared'
-            and receipt.get('format') == 'DMAMOD02' and receipt.get('abi') == ABI
+            and receipt.get('format') in ('DMAMOD02', 'DMAMOD03') and receipt.get('abi') == ABI
             and receipt.get('checked_stack') is True and receipt.get('indirect_policy') == 'guarded-host'
             and receipt.get('module_order') == list(MODULE_ORDER) and receipt.get('unsupported') == [],
-            'receipt is not a complete checked-stack Taiko v2 import')
+            'receipt is not a complete checked-stack Taiko v2/v3 import')
     modules = receipt.get('modules')
     require(isinstance(modules, list) and len(modules) == 3 and
             all(isinstance(item, dict) for item in modules) and
@@ -119,13 +119,43 @@ def load_receipt(capsules):
     return raw, modules
 
 
-def validate_package(path, module):
+def validate_package(path, module, *, expected_format=None):
+    from android_diag_abort import MODULE_REQUIRE_DIAG_ABORT_V1
+    from android_guest_contract import (
+        DM_MODULE_REQUIRE_EXACT_GUEST_V1,
+        DM_MODULE_REQUIRE_RETURNING_RETIRE_V1,
+        EXACT_GUEST_STRIDE_V1,
+         ExactGuestRecordV1,
+        GuestContractError,
+        HEADER_SIZE_V3,
+        MAGIC_V3,
+        RETURNING_RETIRE_STRIDE_V1,
+        ReturningRetireRecordV1,
+        pack_exact_guest_table,
+        pack_returning_retire_table,
+        table_digest,
+        validate_trusted_audit_v1,
+    )
     name = module['name']; pin = SOURCE_PINS[name]
     checked_stat(path)
+    file_size = path.stat().st_size
     with path.open('rb') as stream:
-        header = stream.read(384)
-    require(len(header) == 384 and header[:8] == b'DMAMOD02' and
-            struct.unpack_from('<IIII', header, 8) == (2, ABI, 384, 1), name + ' package v2/ABI/checked-stack header mismatch')
+        prefix = stream.read(HEADER_SIZE_V3)
+    require(len(prefix) >= 384 and prefix[:8] in (b'DMAMOD02', MAGIC_V3),
+            name + ' package v2/v3 magic mismatch')
+    if expected_format is not None:
+        require(prefix[:8].decode('ascii') == expected_format, name + ' package format disagrees with import receipt')
+    version, abi, header_size, required_flags = struct.unpack_from('<IIII', prefix, 8)
+    expected_version = 2 if prefix[:8] == b'DMAMOD02' else 3
+    expected_header_size = 384 if version == 2 else HEADER_SIZE_V3
+    require(version == expected_version and abi == ABI and header_size == expected_header_size and len(prefix) >= header_size,
+            name + ' package v2/ABI/checked-stack header mismatch')
+    header = prefix[:header_size]
+    allowed_flags = 1 | MODULE_REQUIRE_DIAG_ABORT_V1
+    if version == 3:
+        allowed_flags |= DM_MODULE_REQUIRE_EXACT_GUEST_V1 | DM_MODULE_REQUIRE_RETURNING_RETIRE_V1
+    require(bool(required_flags & 1) and (required_flags & ~allowed_flags) == 0,
+            name + ' package v2/ABI/checked-stack header mismatch')
     require(header[168:184] == name.encode().ljust(16, b'\0') and
             header[184:216].hex() == pin['build_id'] and header[216:248].hex() == pin['sha256'],
             name + ' package original identity mismatch')
@@ -135,13 +165,49 @@ def validate_package(path, module):
     gate_stride, param_offset, param_count, param_stride, reserved = struct.unpack_from('<IQQII', header, 356)
     require(gate_stride == 32 and param_stride == 40 and reserved == 0 and param_count == 0,
             name + ' unregistered parameter/profile format')
-    cursor = 384
+    cursor = header_size
     for offset, count, stride in ((fixup_offset, fixup_count, 16), (gate_offset, gate_count, 32), (site_offset, site_count, 16)):
-        require(offset == cursor and count <= (path.stat().st_size - cursor) // stride, name + ' package table layout mismatch')
+        require(offset == cursor and count <= (file_size - cursor) // stride, name + ' package table layout mismatch')
         cursor += count * stride
-    require(param_offset == cursor and payload_offset == (cursor + 15) // 16 * 16 and
-            image_size > 0 and original_size > 0 and payload_offset + image_size == path.stat().st_size,
+    require(param_offset == cursor, name + ' package table layout mismatch')
+    if version == 3:
+        require(header[496:512] == bytes(16), name + ' non-zero DMAMOD03 reserved header tail')
+        (exact_offset, exact_count, exact_stride, exact_schema,
+         retire_offset, retire_count, retire_stride, retire_schema) = struct.unpack_from('<QQIIQQII', header, 384)
+        require(exact_stride == EXACT_GUEST_STRIDE_V1 and exact_schema == 1 and
+                retire_stride == RETURNING_RETIRE_STRIDE_V1 and retire_schema == 1,
+                name + ' package DMAMOD03 table stride/schema mismatch')
+        require(bool(required_flags & DM_MODULE_REQUIRE_EXACT_GUEST_V1) == (exact_count > 0) and
+                bool(required_flags & DM_MODULE_REQUIRE_RETURNING_RETIRE_V1) == (retire_count > 0),
+                name + ' package DMAMOD03 required flags disagree with table counts')
+        if name != 'sdk':
+            require(exact_count == 0 and retire_count == 0, name + ' unexpected non-SDK guest contract tables')
+        for offset, count, stride in ((exact_offset, exact_count, EXACT_GUEST_STRIDE_V1),
+                                      (retire_offset, retire_count, RETURNING_RETIRE_STRIDE_V1)):
+            require(offset == cursor and count <= (file_size - cursor) // stride,
+                    name + ' package DMAMOD03 table layout mismatch')
+            cursor += count * stride
+    require(payload_offset == (cursor + 15) // 16 * 16 and
+            image_size > 0 and original_size > 0 and payload_offset + image_size == file_size,
             name + ' package payload extent mismatch')
+    with path.open('rb') as stream:
+        meta_bytes = stream.read(payload_offset)
+    require(len(meta_bytes) == payload_offset and not any(meta_bytes[cursor:payload_offset]),
+            name + ' package non-zero table padding')
+    if version == 3:
+        exact_bytes = meta_bytes[exact_offset:exact_offset + exact_count * EXACT_GUEST_STRIDE_V1]
+        retire_bytes = meta_bytes[retire_offset:retire_offset + retire_count * RETURNING_RETIRE_STRIDE_V1]
+        require(header[432:464] == table_digest(exact_bytes) and header[464:496] == table_digest(retire_bytes),
+                name + ' package DMAMOD03 table digest mismatch')
+        try:
+            exact_records = [ExactGuestRecordV1.unpack(exact_bytes[i:i + EXACT_GUEST_STRIDE_V1])
+                             for i in range(0, len(exact_bytes), EXACT_GUEST_STRIDE_V1)]
+            retire_records = [ReturningRetireRecordV1.unpack(retire_bytes[i:i + RETURNING_RETIRE_STRIDE_V1])
+                              for i in range(0, len(retire_bytes), RETURNING_RETIRE_STRIDE_V1)]
+            pack_exact_guest_table(exact_records)
+            pack_returning_retire_table(retire_records)
+        except GuestContractError as error:
+            raise ContentError(name + ' invalid DMAMOD03 table records: ' + str(error)) from error
     actual, payload_hash = digest_file(path, payload_offset=payload_offset)
     rewrite = module.get('rewrite')
     require(actual == dict(bytes=module.get('package_size'), sha256=module.get('package_sha256')) and
@@ -150,6 +216,21 @@ def validate_package(path, module):
             module.get('source_sha256') == pin['sha256'] and module.get('build_id') == pin['build_id'] and
             module.get('unsupported') == [] and isinstance(rewrite, dict) and rewrite.get('checked_stack') is True,
             name + ' package differs from checked import receipt')
+    if version == 3 and (exact_count > 0 or retire_count > 0):
+        guest_audit = module.get('guest_contract_audit')
+        try:
+            require(isinstance(guest_audit, dict), name + ' missing guest_contract_audit receipt')
+            validate_trusted_audit_v1(guest_audit)
+        except GuestContractError as error:
+            raise ContentError(name + ' invalid guest_contract_audit receipt: ' + str(error)) from error
+        require(guest_audit.get('package_sha256') == actual['sha256'] and
+                guest_audit.get('source_sha256') == pin['sha256'] and
+                guest_audit.get('build_id') == pin['build_id'] and
+                guest_audit.get('exact_guest') == {'count': exact_count, 'table_sha256': header[432:464].hex()} and
+                guest_audit.get('returning_retire') == {'count': retire_count, 'table_sha256': header[464:496].hex()},
+                name + ' guest_contract_audit receipt mismatch')
+    else:
+        require('guest_contract_audit' not in module, name + ' unexpected guest_contract_audit receipt')
     audit = module.get('callback_audit', {})
     require(isinstance(audit, dict) and audit.get('callback_audit_version') == 1 and
             audit.get('package_sha256') == actual['sha256'] and audit.get('source_sha256') == pin['sha256'] and
@@ -190,7 +271,9 @@ def package_content(source, capsules, output):
     require(not output.is_relative_to(source) and not output.is_relative_to(capsules), 'output must be outside input trees')
     sources = validate_sources(source)
     raw_receipt, modules = load_receipt(capsules)
-    packages = [validate_package(capsules / (module['name'] + '.dmag'), module) for module in modules]
+    expected_format = json.loads(raw_receipt).get('format')
+    packages = [validate_package(capsules / (module['name'] + '.dmag'), module, expected_format=expected_format)
+                for module in modules]
     entries = resource_tree(source / 'RomFS')
     require(any(not directory for _, _, directory in entries), 'RomFS must contain original resource files')
     # Validate everything before publication; interrupted copies never create output.

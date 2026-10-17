@@ -13,6 +13,12 @@ struct TaikoModulePin {
     std::array<uint8_t,32> package_sha256, image_sha256;
     uint64_t package_bytes, image_bytes;
     TrustedCallbackAudit callback_audit;
+    uint32_t required_flags = 0;
+    uint64_t exact_guest_count = 0;
+    std::array<uint8_t,32> exact_guest_table_sha256{};
+    uint64_t returning_retire_count = 0;
+    std::array<uint8_t,32> returning_retire_table_sha256{};
+    TrustedGuestContractAuditV1 guest_contract_audit{};
 };
 struct TaikoBuildPins {
     uint32_t schema;

@@ -26,11 +26,18 @@ bool equal_package(const ModulePackage& a,const ModulePackage& b) {
        a.symbol_count!=b.symbol_count || a.string_bytes!=b.string_bytes ||
        a.data_offset!=b.data_offset || a.data_bytes!=b.data_bytes || a.bss_bytes!=b.bss_bytes ||
        a.bytes!=b.bytes || a.wire_version!=b.wire_version || a.profile_class!=b.profile_class ||
+       a.checked_stack!=b.checked_stack || a.required_flags!=b.required_flags ||
+       a.exact_guest_table_sha256!=b.exact_guest_table_sha256 ||
+       a.returning_retire_table_sha256!=b.returning_retire_table_sha256 ||
+       a.final_independent_roots_sha256!=b.final_independent_roots_sha256 ||
+       a.whole_function_ownership_proof_sha256!=b.whole_function_ownership_proof_sha256 ||
        a.profile_digest!=b.profile_digest || a.profile!=b.profile) return false;
     return equal_vector(a.fixups,b.fixups,[](auto& x,auto& y){return x.offset==y.offset&&x.helper==y.helper;}) &&
       equal_vector(a.gates,b.gates,[](auto& x,auto& y){return x.return_offset==y.return_offset&&x.kind==y.kind&&x.argument==y.argument;}) &&
       equal_vector(a.gate_provenance,b.gate_provenance,[](auto& x,auto& y){return x.return_offset==y.return_offset&&x.original_offset==y.original_offset&&x.kind==y.kind&&x.argument==y.argument&&x.original_word==y.original_word&&x.flags==y.flags;}) &&
       equal_vector(a.parameters,b.parameters,[](auto& x,auto& y){return x.a==y.a&&x.b==y.b&&x.word_a==y.word_a&&x.word_b==y.word_b&&x.destination==y.destination&&x.slot==y.slot&&x.flags==y.flags;}) &&
+      equal_vector(a.exact_guest_records,b.exact_guest_records,[](const auto& x,const auto& y){return std::memcmp(&x,&y,sizeof(ExactGuestRecordV1))==0;}) &&
+      equal_vector(a.returning_retire_records,b.returning_retire_records,[](const auto& x,const auto& y){return std::memcmp(&x,&y,sizeof(ReturningRetireRecordV1))==0;}) &&
       equal_vector(a.sites,b.sites,[](auto& x,auto& y){return x.original_offset==y.original_offset&&x.trampoline_offset==y.trampoline_offset;}) &&
       equal_vector(a.segments,b.segments,[](auto& x,auto& y){return x.offset==y.offset&&x.size==y.size&&x.flags==y.flags;}) &&
       a.image.abi==DM_ANDROID_GUEST_ABI && a.image.bytes==a.bytes.data() && a.image.size==a.bytes.size() &&

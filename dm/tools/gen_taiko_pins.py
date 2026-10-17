@@ -7,7 +7,7 @@ Only a deliberately compiled provider supplies the native authority contract.
 """
 import argparse
 from bisect import bisect_right
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import json
 import os
@@ -15,8 +15,11 @@ from pathlib import Path
 import struct
 import tempfile
 
-from android_rewrite import decode, indirect_register, stack_check_operation
+import android_guest_contract as contract
+from android_instruction import Instruction
+from android_rewrite import FatalWord, decode, indirect_register, stack_check_operation
 from android_diag_abort import MODULE_REQUIRE_DIAG_ABORT_V1, abi_header_sha256, validate_publication_contract
+import nso_format
 from nso_format import parse_nso, parse_metadata
 from taiko_call_contract import select_checked_calls
 from taiko_forest_audit import verify_checked_call_forests
@@ -118,15 +121,24 @@ def verify_checked_calls(nso, metadata, discovery, rewrite, site_offsets, code_r
     return selected
 
 
-def verify_package(path, report, source, nso, metadata):
+def verify_package(path, report, source, nso, metadata, *, expected_format=None):
     """Title-neutral byte audit; generate() supplies only hard-pinned sources."""
     checked_stat(path)
     require(path.stat().st_size <= MAX_PACKAGE, 'capsule exceeds bounded size')
     data = path.read_bytes(); name = source['name']
-    require(len(data) >= 384 and data[:8] == b'DMAMOD02' and
-        struct.unpack_from('<III', data, 8) == (2, ABI, 384), 'capsule must be checked-stack DMAMOD02')
-    required_flags=struct.unpack_from('<I',data,20)[0]
-    if required_flags not in (1,1|MODULE_REQUIRE_DIAG_ABORT_V1):
+    require(len(data) >= 384 and data[:8] in (b'DMAMOD02', contract.MAGIC_V3),
+        'capsule must be checked-stack DMAMOD02 or DMAMOD03')
+    if expected_format is not None:
+        require(data[:8].decode('ascii') == expected_format, 'capsule wire format disagrees with import receipt')
+    version, abi_word, header_size, required_flags = struct.unpack_from('<IIII', data, 8)
+    expected_version = 2 if data[:8] == b'DMAMOD02' else 3
+    expected_header_size = 384 if version == 2 else contract.HEADER_SIZE_V3
+    require(version == expected_version and abi_word == ABI and header_size == expected_header_size and len(data) >= header_size,
+        'capsule must be checked-stack DMAMOD02 or DMAMOD03')
+    allowed_flags = 1 | MODULE_REQUIRE_DIAG_ABORT_V1
+    if version == 3:
+        allowed_flags |= contract.DM_MODULE_REQUIRE_EXACT_GUEST_V1 | contract.DM_MODULE_REQUIRE_RETURNING_RETIRE_V1
+    if not (required_flags & 1) or (required_flags & ~allowed_flags):
         raise ValueError('original capsule has unknown or inconsistent required ABI flags')
     receipt=report.get('rewrite',{})
     if not isinstance(receipt,dict):
@@ -150,11 +162,44 @@ def verify_package(path, report, source, nso, metadata):
     gate_stride, parameter_offset, parameter_count, parameter_stride, reserved = struct.unpack_from('<IQQII', data, 356)
     require((gate_stride, parameter_count, parameter_stride, reserved) == (32, 0, 40, 0),
         'noncanonical capsule parameters or gate stride')
-    cursor = 384
+    cursor = header_size
     for offset, count, stride in ((fixup_offset, fixup_count, 16), (gate_offset, gate_count, 32), (site_offset, site_count, 16)):
         require(offset == cursor and count <= (len(data) - cursor) // stride, 'noncanonical capsule table count/extent')
         cursor += count * stride
-    require(parameter_offset == cursor and payload == (cursor + 15) // 16 * 16 and
+    require(parameter_offset == cursor, 'noncanonical capsule parameter offset')
+    exact_count = 0
+    retire_count = 0
+    exact_table_sha256 = '0' * 64
+    retire_table_sha256 = '0' * 64
+    exact_records = []
+    retire_records = []
+    if version == 3:
+        require(data[496:512] == bytes(16), 'noncanonical DMAMOD03 reserved header bytes')
+        (exact_offset, exact_count, exact_stride, exact_schema,
+         retire_offset, retire_count, retire_stride, retire_schema) = struct.unpack_from('<QQIIQQII', data, 384)
+        require((exact_stride, exact_schema, retire_stride, retire_schema) ==
+            (contract.EXACT_GUEST_STRIDE_V1, 1, contract.RETURNING_RETIRE_STRIDE_V1, 1),
+            'noncanonical DMAMOD03 table stride or schema')
+        require(bool(required_flags & contract.DM_MODULE_REQUIRE_EXACT_GUEST_V1) == (exact_count > 0) and
+            bool(required_flags & contract.DM_MODULE_REQUIRE_RETURNING_RETIRE_V1) == (retire_count > 0),
+            'DMAMOD03 required flags disagree with table counts')
+        for offset, count, stride in ((exact_offset, exact_count, contract.EXACT_GUEST_STRIDE_V1),
+                                      (retire_offset, retire_count, contract.RETURNING_RETIRE_STRIDE_V1)):
+            require(offset == cursor and count <= (len(data) - cursor) // stride, 'noncanonical DMAMOD03 table extent')
+            cursor += count * stride
+        exact_bytes = data[exact_offset:exact_offset + exact_count * contract.EXACT_GUEST_STRIDE_V1]
+        retire_bytes = data[retire_offset:retire_offset + retire_count * contract.RETURNING_RETIRE_STRIDE_V1]
+        require(data[432:464] == contract.table_digest(exact_bytes) and
+            data[464:496] == contract.table_digest(retire_bytes), 'DMAMOD03 table digest mismatch')
+        exact_table_sha256 = data[432:464].hex()
+        retire_table_sha256 = data[464:496].hex()
+        exact_records = [contract.ExactGuestRecordV1.unpack(exact_bytes[i:i + contract.EXACT_GUEST_STRIDE_V1])
+                         for i in range(0, len(exact_bytes), contract.EXACT_GUEST_STRIDE_V1)]
+        retire_records = [contract.ReturningRetireRecordV1.unpack(retire_bytes[i:i + contract.RETURNING_RETIRE_STRIDE_V1])
+                          for i in range(0, len(retire_bytes), contract.RETURNING_RETIRE_STRIDE_V1)]
+        contract.pack_exact_guest_table(exact_records)
+        contract.pack_returning_retire_table(retire_records)
+    require(payload == (cursor + 15) // 16 * 16 and
         payload + image_size == len(data) and not any(data[cursor:payload]), 'noncanonical capsule payload extent')
     image = memoryview(data)[payload:]
     digest, image_digest = sha(data), sha(image)
@@ -171,6 +216,76 @@ def verify_package(path, report, source, nso, metadata):
         rewrite.get('size') == image_size and rewrite.get('checked_stack') is True and
         rewrite.get('indirect_policy') == 'guarded-host' and not any(key in rewrite for key in
         ('profile_digest', 'profile_class', 'parameters')), 'stock rewrite metadata mismatch')
+    if version == 3:
+        require(rewrite.get('exact_guest_count') == exact_count and
+            rewrite.get('exact_guest_table_sha256') == exact_table_sha256 and
+            rewrite.get('returning_retire_count') == retire_count and
+            rewrite.get('returning_retire_table_sha256') == retire_table_sha256,
+            'DMAMOD03 rewrite receipt disagrees with table counts or digests')
+    else:
+        require(not any(key in rewrite for key in
+            ('exact_guest_count', 'exact_guest_table_sha256', 'returning_retire_count', 'returning_retire_table_sha256')),
+            'DMAMOD02 rewrite receipt contains v3 guest contract fields')
+    roots = sorted({symbol.value for symbol in metadata.symbols if symbol.kind == 2 and symbol.section not in (0, 0xfff1)})
+    discovery = report.get('code_discovery', {})
+    code_roots = discovery.get('roots') if isinstance(discovery, dict) else None
+    ranges = report.get('code_ranges')
+    require(isinstance(code_roots, list) and all(type(root) is int for root in code_roots) and
+        code_roots == sorted(set(code_roots)) and isinstance(ranges, list), 'invalid original code root receipt')
+    previous_end, starts = 0, []
+    for selected in ranges:
+        require(isinstance(selected, (list, tuple)) and len(selected) == 2 and all(type(value) is int for value in selected),
+            'invalid original code interval')
+        start, end = selected
+        require(start % 4 == end % 4 == 0 and previous_end <= start < end <= nso.sections[0].end, 'invalid original code interval')
+        starts.append(start); previous_end = end
+    root_set = set(code_roots)
+    spec = contract.TAIKO_SDK_GUEST_CONTRACT_SPEC
+    is_contracted_v3_sdk = (
+        version == 3 and
+        name == 'sdk' and
+        nso.source_sha256.hex() == spec.source_sha256_hex and
+        nso.build_id.hex() == spec.build_id_hex
+    )
+    selected_contract = None
+    retire_by_callsite = {}
+    if is_contracted_v3_sdk:
+        require(exact_count == 5 and retire_count == 2, 'contracted v3 SDK must carry 5 exact-guest and 2 returning-retire records')
+        independent_roots = discovery.get('independent_roots')
+        require(isinstance(independent_roots, list) and all(type(r) is int for r in independent_roots) and
+            independent_roots == sorted(set(independent_roots)) and set(independent_roots) <= root_set,
+            'invalid original independent root receipt')
+        by_pc = {}
+        for start, end in ranges:
+            for pc in range(start, end, 4):
+                ins = decode(struct.unpack_from('<I', nso.image, pc)[0], pc)
+                by_pc[pc] = ins if isinstance(ins, FatalWord) else Instruction(ins)
+        orig_parse_nso, orig_parse_metadata = nso_format.parse_nso, nso_format.parse_metadata
+        try:
+            nso_format.parse_nso = lambda _raw: nso
+            nso_format.parse_metadata = lambda _nso: metadata
+            selected_contract = contract.select_taiko_guest_contract(
+                b'',
+                nso.image,
+                by_pc,
+                independent_roots=independent_roots,
+                final_roots=code_roots,
+                patch_offset=expected_patch,
+                spec=spec,
+            )
+        finally:
+            nso_format.parse_nso = orig_parse_nso
+            nso_format.parse_metadata = orig_parse_metadata
+        require(tuple(retire_records) == selected_contract.returning_retire_records,
+            'returning-retire table differs from independently re-derived source contract')
+        require(len(exact_records) == len(selected_contract.exact_guest_records) and
+            all(replace(actual, gate_return_offset=expected_patch) == expected
+                for actual, expected in zip(exact_records, selected_contract.exact_guest_records)),
+            'exact-guest table differs from independently re-derived source contract')
+        retire_by_callsite = {rec.source_callsite: rec for rec in retire_records}
+    else:
+        require(exact_count == 0 and retire_count == 0 and 'guest_contract_audit' not in report,
+            'uncontracted module cannot carry v3 guest contract tables or audit')
     fixups = []
     seen_fixups = set()
     for offset in range(fixup_offset, fixup_offset + fixup_count * 16, 16):
@@ -192,20 +307,44 @@ def verify_package(path, report, source, nso, metadata):
         site_offsets.add(at)
         original_word = struct.unpack_from('<I', nso.image, at)[0]
         actual_word = struct.unpack_from('<I', image, at)[0]
-        # Relocated exclusive-region interior records can preserve the source
-        # instruction in place; every changed source site is a plain B stub.
-        if actual_word != original_word:
+        if at in retire_by_callsite:
+            rec = retire_by_callsite[at]
+            delta = (actual_word & 0x3ffffff) * 4
+            if delta & (1 << 27): delta -= 1 << 28
+            require(trampoline == rec.reserved_stub_offset and original_word == rec.original_bl_word and
+                rec.normal_return == at + 4 and rec.stub_extent == 8 and
+                actual_word & 0xfc000000 == 0x94000000 and at + delta == rec.reserved_stub_offset,
+                'invalid returning-retire source site BL')
+        elif actual_word != original_word:
+            # Relocated exclusive-region interior records can preserve the source
+            # instruction in place; every other changed source site is a plain B stub.
             delta = (actual_word & 0x3ffffff) * 4
             if delta & (1 << 27): delta -= 1 << 28
             require(actual_word & 0xfc000000 == 0x14000000 and at + delta == trampoline, 'invalid source site branch')
         restored[at:at+4] = nso.image[at:at+4]
     require(restored == nso.image and not any(image[original_size:expected_patch]),
         'stock capsule changed original image outside recorded instruction sites')
+    if is_contracted_v3_sdk:
+        require(set(retire_by_callsite) <= site_offsets, 'returning-retire callsite missing from site table')
+        for index_rec, rec in enumerate(retire_records):
+            require(rec.reserved_stub_offset == expected_patch + index_rec * 8 and rec.stub_extent == 8 and
+                rec.reserved_stub_offset + 8 <= image_size, 'returning-retire reserved stub offset/extent mismatch')
+            stub_w0, stub_w1 = struct.unpack_from('<II', image, rec.reserved_stub_offset)
+            stub_delta = (stub_w1 & 0x3ffffff) * 4
+            if stub_delta & (1 << 27): stub_delta -= 1 << 28
+            require(stub_w0 == 0xD5033F5F and (stub_w1 & 0xfc000000) == 0x14000000 and
+                (rec.reserved_stub_offset + 4) + stub_delta == rec.original_target,
+                'returning-retire reserved stub CLREX/B mismatch')
+            require(not any(rec.reserved_stub_offset < f + 8 and f < rec.reserved_stub_offset + 8 for f in seen_fixups),
+                'returning-retire reserved stub overlaps helper fixup')
     gates, provenance, seen_returns = [], [], set()
+    allowed_gate_kinds = (1, 2, 4, 5, contract.DM_GUEST_EXACT_GUEST) if is_contracted_v3_sdk else (1, 2, 4, 5)
+    min_gate_return = expected_patch + len(retire_records) * 8 + 4
+    exact_gate_tuples = []
     for offset in range(gate_offset, gate_offset + gate_count * 32, 32):
         return_offset, original_offset, kind, argument, original_word, flags = struct.unpack_from('<QQIIII', data, offset)
-        require(flags == 0 and kind in (1, 2, 4, 5) and return_offset % 4 == 0 and
-            expected_patch + 4 <= return_offset <= image_size - 4 and return_offset not in seen_returns and
+        require(flags == 0 and kind in allowed_gate_kinds and return_offset % 4 == 0 and
+            min_gate_return <= return_offset <= image_size - 4 and return_offset not in seen_returns and
             original_offset in site_offsets and struct.unpack_from('<I', nso.image, original_offset)[0] == original_word and
             struct.unpack_from('<I', image, return_offset - 4)[0] == 0xD63F03C0,
             'stock gate has invalid provenance or OBS/private authority')
@@ -221,26 +360,27 @@ def verify_package(path, report, source, nso, metadata):
                 'stock timer gate mismatch')
         elif kind == 4:
             require(argument == indirect_register(decode(original_word, original_offset)), 'stock guarded transfer mismatch')
+        elif kind == contract.DM_GUEST_EXACT_GUEST:
+            require(argument == 17 and argument == indirect_register(decode(original_word, original_offset)),
+                'stock exact-guest transfer mismatch')
+            exact_gate_tuples.append((original_offset, return_offset, argument, original_word, flags))
         else:
             require(argument == original_word and stack_check_operation(original_word) is not None, 'stock checked-stack gate mismatch')
         gates.append(dict(return_offset=return_offset, kind=kind, argument=argument))
         provenance.append(dict(return_offset=return_offset, original_offset=original_offset, original_word=original_word, flags=flags))
     require(gates == rewrite.get('gates') and provenance == rewrite.get('gate_provenance'), 'gate receipt/table mismatch')
+    if is_contracted_v3_sdk:
+        expected_exact_gates = [
+            (rec.original_br_offset, rec.gate_return_offset, rec.target_register, rec.original_br_word, 0)
+            for rec in exact_records
+        ]
+        require(sorted(exact_gate_tuples) == expected_exact_gates,
+            'exact-guest records disagree with structural kind-6 gates')
+        for rec in exact_records:
+            site = next((s for s in sites if s.get('offset') == rec.original_br_offset), None)
+            require(site is not None and expected_patch <= site['trampoline'] <= rec.gate_return_offset - 4,
+                'exact-guest PLT site trampoline mismatch')
     validate_publication_contract(nso,metadata,data,receipt)
-    roots = sorted({symbol.value for symbol in metadata.symbols if symbol.kind == 2 and symbol.section not in (0, 0xfff1)})
-    discovery = report.get('code_discovery', {})
-    code_roots = discovery.get('roots') if isinstance(discovery, dict) else None
-    ranges = report.get('code_ranges')
-    require(isinstance(code_roots, list) and all(type(root) is int for root in code_roots) and
-        code_roots == sorted(set(code_roots)) and isinstance(ranges, list), 'invalid original code root receipt')
-    previous_end, starts = 0, []
-    for selected in ranges:
-        require(isinstance(selected, (list, tuple)) and len(selected) == 2 and all(type(value) is int for value in selected),
-            'invalid original code interval')
-        start, end = selected
-        require(start % 4 == end % 4 == 0 and previous_end <= start < end <= nso.sections[0].end, 'invalid original code interval')
-        starts.append(start); previous_end = end
-    root_set = set(code_roots)
     require(0 < len(roots) <= min(1_048_576, nso.sections[0].size // 4), 'missing/bounded callback roots')
     for root in roots:
         position = bisect_right(starts, root) - 1
@@ -255,8 +395,26 @@ def verify_package(path, report, source, nso, metadata):
     audit = dict(callback_audit_version=1, package_sha256=digest, source_sha256=source['source_sha256'],
         indirect_policy='guarded-host', callback_root_kind='defined-stt-func', callback_roots=roots)
     require(report.get('callback_audit') == audit, 'callback receipt differs from original defined STT_FUNC entries')
-    return dict(name=name, source_sha256=source['source_sha256'], package_sha256=digest, image_sha256=image_digest,
+    guest_contract_audit = None
+    if is_contracted_v3_sdk:
+        guest_contract_audit = contract.build_trusted_audit_v1(
+            data,
+            source_sha256=nso.source_sha256,
+            build_id=nso.build_id,
+            exact_guest_records=exact_records,
+            returning_retire_records=retire_records,
+            toolset_recipe_digest=selected_contract.toolset_recipe_sha256,
+            final_independent_roots_digest=selected_contract.final_independent_roots_sha256,
+            ownership_proof_digest=selected_contract.ownership_proof_sha256,
+        )
+        require(report.get('guest_contract_audit') == guest_contract_audit,
+            'guest_contract_audit receipt differs from independently re-derived contract')
+    return dict(name=name, wire_version=version, required_flags=required_flags,
+        source_sha256=source['source_sha256'], package_sha256=digest, image_sha256=image_digest,
         package_bytes=len(data), image_bytes=image_size, callback_audit=audit,
+        exact_guest_count=exact_count, exact_guest_table_sha256=exact_table_sha256,
+        returning_retire_count=retire_count, returning_retire_table_sha256=retire_table_sha256,
+        guest_contract_audit=guest_contract_audit,
         original_image_restored_sha256=sha(restored), site_count=site_count, gate_count=gate_count, fixup_count=fixup_count,
         versioned_checked_calls=checked_calls, versioned_checked_call_forests=checked_forests)
 
@@ -310,8 +468,9 @@ def verify_content(directory, modules, import_sha):
 
 
 def emit_provider(model):
-    def digest(value):
-        require(isinstance(value, str) and len(value) == 64 and any(c != '0' for c in value) and
+    def digest(value, *, allow_zero=False):
+        require(isinstance(value, str) and len(value) == 64 and
+            (allow_zero or any(c != '0' for c in value)) and
             all(c in '0123456789abcdef' for c in value), 'zero/malformed digest cannot enter compiled pins')
         return '{{' + ','.join('0x' + value[index:index+2] for index in range(0, 64, 2)) + '}}'
     def source_value(source):
@@ -329,11 +488,34 @@ def emit_provider(model):
         '};', 'static const TaikoModulePin modules[]={']
     for index, module in enumerate(model['modules']):
         audit = module['callback_audit']
+        required_flags = module.get('required_flags', 1)
+        exact_count = module.get('exact_guest_count', 0)
+        exact_sha = module.get('exact_guest_table_sha256', '0' * 64)
+        retire_count = module.get('returning_retire_count', 0)
+        retire_sha = module.get('returning_retire_table_sha256', '0' * 64)
+        gca = module.get('guest_contract_audit')
+        if exact_count > 0 or retire_count > 0:
+            require(isinstance(gca, dict), 'non-empty guest contract module requires guest_contract_audit')
+            exact_cpp = digest(exact_sha)
+            retire_cpp = digest(retire_sha)
+            gca_cpp = ('{1,0,' + digest(gca['package_sha256']) + ',' + digest(gca['source_sha256']) + ',' +
+                digest(gca['build_id']) + ',' + digest(gca['toolset_recipe_sha256']) + ',' +
+                digest(gca['audit_identity_sha256']) + ',' +
+                f'{exact_count}ull,{exact_cpp},{retire_count}ull,{retire_cpp},' +
+                digest(gca['final_independent_roots_sha256']) + ',' +
+                digest(gca['whole_function_ownership_proof_sha256']) + '}')
+        else:
+            require(gca is None and exact_sha == '0' * 64 and retire_sha == '0' * 64,
+                'empty guest contract module must have zero table digests and no guest_contract_audit')
+            exact_cpp = digest(exact_sha, allow_zero=True)
+            retire_cpp = digest(retire_sha, allow_zero=True)
+            gca_cpp = '{}'
         lines.append('{' + json.dumps(module['name']) + ',' + digest(module['package_sha256']) + ',' + digest(module['image_sha256']) +
             f",{module['package_bytes']}ull,{module['image_bytes']}ull," + '{1,' + digest(module['package_sha256']) + ',' +
             digest(audit['source_sha256']) + ',CallbackIndirectPolicy::GuardedHost,CallbackRootKind::DefinedSttFunc,' +
-            f'roots_{index},sizeof(roots_{index})/sizeof(uint64_t)' + '}},')
-    lines += ['};', 'static const TaikoBuildPins build_pins={1,' + json.dumps(BUILD) + ',' + json.dumps(PROGRAM_ID) + ',' +
+            f'roots_{index},sizeof(roots_{index})/sizeof(uint64_t)' + '},' +
+            f'{required_flags}u,{exact_count}ull,{exact_cpp},{retire_count}ull,{retire_cpp},{gca_cpp}' + '},')
+    lines += ['};', 'static const TaikoBuildPins build_pins={2,' + json.dumps(BUILD) + ',' + json.dumps(PROGRAM_ID) + ',' +
         digest(SOURCE_PINS['main.npdm']['sha256']) + ',' + source_value(model['rtld']) + ',sources,3,modules,3,' +
         digest(model['source_audit_sha256']) + ',' + digest(model['import_manifest_sha256']) + '};',
         'static const TaikoResourcePin resources[]={']
@@ -376,18 +558,20 @@ def generate(source, capsules, content, output, audit_output):
     inventory = verify_import_closure(objects)
     raw, receipt = json_file(capsules / 'import.json', 512 * 1024 * 1024)
     require(isinstance(receipt, dict) and receipt.get('status') == 'prepared' and receipt.get('unsupported') == [] and
-        receipt.get('format') == 'DMAMOD02' and receipt.get('abi') == ABI and receipt.get('checked_stack') is True and
+        receipt.get('format') == 'DMAMOD03' and receipt.get('abi') == ABI and receipt.get('checked_stack') is True and
         receipt.get('indirect_policy') == 'guarded-host' and receipt.get('module_order') == list(MODULE_ORDER) and
         isinstance(receipt.get('modules'), list) and len(receipt['modules']) == 3, 'original import is incomplete/rejected/noncanonical')
-    modules = [verify_package(capsules / (name + '.dmag'), receipt['modules'][index], facts[name], *objects[name])
+    modules = [verify_package(capsules / (name + '.dmag'), receipt['modules'][index], facts[name], *objects[name],
+                              expected_format='DMAMOD03')
         for index, name in enumerate(MODULE_ORDER)]
-    audit = dict(schema=1, build=BUILD, program_id=PROGRAM_ID, npdm_sha256=SOURCE_PINS['main.npdm']['sha256'],
+    audit = dict(schema=2, build=BUILD, program_id=PROGRAM_ID, npdm_sha256=SOURCE_PINS['main.npdm']['sha256'],
         rtld=facts['rtld'], sources=[facts[name] for name in MODULE_ORDER], import_inventory=inventory,
         recipe_sha256={name: sha((ROOT / 'dm/tools' / name).read_bytes()) for name in
             ('gen_taiko_pins.py', 'taiko_content.py', 'taiko_call_contract.py', 'taiko_sdk_contract.py', 'taiko_forest_audit.py',
-             'nso_eh.py', 'nso_format.py', 'android_import.py', 'android_rewrite.py', 'android_exclusive.py', 'android_instruction.py', 'android_diag_abort.py')},
+             'nso_eh.py', 'nso_format.py', 'android_import.py', 'android_rewrite.py', 'android_exclusive.py', 'android_instruction.py',
+             'android_diag_abort.py', 'android_guest_contract.py')},
         diag_abort_abi_header_sha256=abi_header_sha256())
-    model = dict(schema=1, build=BUILD, program_id=PROGRAM_ID, rtld=facts['rtld'], sources=audit['sources'],
+    model = dict(schema=2, build=BUILD, program_id=PROGRAM_ID, rtld=facts['rtld'], sources=audit['sources'],
         modules=modules, source_audit=audit, source_audit_sha256=sha(canonical(audit)), import_manifest_sha256=sha(raw))
     model['content'] = verify_content(content, modules, model['import_manifest_sha256'])
     provider = emit_provider(model).encode('utf-8')

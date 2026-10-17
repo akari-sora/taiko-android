@@ -268,15 +268,47 @@ class TaikoPinTests(unittest.TestCase):
         root, _, _, receipt_sha = self.content_fixture()
         module = self.verify()
         content = pins.verify_content(root, self.content_fixture_modules(root), receipt_sha)
-        model = dict(rtld=dict(self.fact, name='rtld'), sources=[dict(self.fact, name=name) for name in pins.MODULE_ORDER],
-            modules=[dict(module, name=name) for name in pins.MODULE_ORDER],
-            source_audit_sha256='1' * 64, import_manifest_sha256='2' * 64, content=content)
+        sdk_module = copy.deepcopy(module)
+        sdk_module['name'] = 'sdk'
+        sdk_module['required_flags'] = 1 | 4 | 8
+        sdk_module['exact_guest_count'] = 5
+        sdk_module['exact_guest_table_sha256'] = '3' * 64
+        sdk_module['returning_retire_count'] = 2
+        sdk_module['returning_retire_table_sha256'] = '4' * 64
+        sdk_module['guest_contract_audit'] = dict(
+            schema=1,
+            flags=0,
+            package_sha256=sdk_module['package_sha256'],
+            source_sha256=sdk_module['source_sha256'],
+            build_id=self.fact['build_id'],
+            toolset_recipe_sha256='5' * 64,
+            exact_guest=dict(count=5, table_sha256='3' * 64),
+            returning_retire=dict(count=2, table_sha256='4' * 64),
+            final_independent_roots_sha256='6' * 64,
+            whole_function_ownership_proof_sha256='7' * 64,
+            audit_identity_sha256='8' * 64,
+        )
+        model = dict(
+            rtld=dict(self.fact, name='rtld'),
+            sources=[dict(self.fact, name=name) for name in pins.MODULE_ORDER],
+            modules=[
+                dict(module, name='main'),
+                dict(module, name='subsdk0'),
+                sdk_module,
+            ],
+            source_audit_sha256='1' * 64,
+            import_manifest_sha256='2' * 64,
+            content=content,
+        )
         emitted = pins.emit_provider(model)
         self.assertIn('#include "taiko_bringup.h"', emitted)
         self.assertIn('#include "taiko_resources.h"', emitted)
         self.assertIn('compiled_taiko_bringup_pins()', emitted)
         self.assertIn('compiled_taiko_content_pins()', emitted)
+        self.assertIn('static const TaikoBuildPins build_pins={2,', emitted)
         self.assertIn('Taiko/01002460135A4000/Stock-v1', emitted)
+        self.assertIn(',5ull,', emitted)
+        self.assertIn(',2ull,', emitted)
         self.assertNotIn('fixture resource, never an original game', emitted)
         self.assertNotIn('D2R/', emitted)
 
@@ -292,5 +324,136 @@ class TaikoPinTests(unittest.TestCase):
         self.assertEqual(output.read_bytes(), b'first complete payload')
         self.assertEqual(list(self.directory.glob('.provider.cpp-*')), [])
 
+    def test_v3_sdk_package_passes_independent_rederivation_and_dedicated_retire_bl_audit(self):
+        sys.path.insert(0, str(Path(__file__).parent))
+        import android_guest_contract as contract
+        from test_android_guest_contract_v3_dispatch import build_synthetic_v3_sdk
+
+        sdk_source, spec = build_synthetic_v3_sdk()
+        sdk_nso = parse_nso(sdk_source)
+        sdk_meta = parse_metadata(sdk_nso)
+        sdk_fact = dict(
+            name='sdk',
+            source_bytes=len(sdk_source),
+            source_sha256=hashlib.sha256(sdk_source).hexdigest(),
+            decoded_sha256=hashlib.sha256(sdk_nso.image).hexdigest(),
+            build_id=sdk_nso.build_id.hex(),
+        )
+        with patch.object(contract, 'TAIKO_SDK_GUEST_CONTRACT_SPEC', spec):
+            pkg, rep = android_import.import_module(
+                sdk_source, 'sdk', package_version=3,
+                indirect_policy='guarded-host', callback_audit=True, checked_stack=True,
+            )
+            sdk_path = self.directory / 'sdk.dmag'
+            sdk_path.write_bytes(pkg)
+            result = pins.verify_package(sdk_path, rep, sdk_fact, sdk_nso, sdk_meta)
+            self.assertEqual(result['wire_version'], 3)
+            self.assertEqual(result['exact_guest_count'], 5)
+            self.assertEqual(result['returning_retire_count'], 2)
+            self.assertEqual(
+                result['required_flags'],
+                1 | contract.DM_MODULE_REQUIRE_EXACT_GUEST_V1 | contract.DM_MODULE_REQUIRE_RETURNING_RETIRE_V1,
+            )
+            self.assertEqual(result['guest_contract_audit'], rep['guest_contract_audit'])
+
+            # Mutating returning-retire callsite from BL to B must be rejected by dedicated verifier
+            bad_pkg = bytearray(pkg)
+            bad_rep = copy.deepcopy(rep)
+            payload = struct.unpack_from('<Q', bad_pkg, 112)[0]
+            callsite = spec.returning_retire.calls[0].source_callsite
+            bl_word = struct.unpack_from('<I', bad_pkg, payload + callsite)[0]
+            struct.pack_into('<I', bad_pkg, payload + callsite, bl_word & ~0x80000000)
+            self._resign_v3(bad_pkg, bad_rep, sdk_path)
+            with self.assertRaisesRegex(ValueError, 'returning.retire'):
+                pins.verify_package(sdk_path, bad_rep, sdk_fact, sdk_nso, sdk_meta)
+
+            # Mutating reserved stub CLREX must be rejected
+            bad_pkg = bytearray(pkg)
+            bad_rep = copy.deepcopy(rep)
+            expected_patch = (len(sdk_nso.image) + 16383) // 16384 * 16384
+            struct.pack_into('<I', bad_pkg, payload + expected_patch, 0xD503201F)
+            self._resign_v3(bad_pkg, bad_rep, sdk_path)
+            with self.assertRaisesRegex(ValueError, 'returning.retire'):
+                pins.verify_package(sdk_path, bad_rep, sdk_fact, sdk_nso, sdk_meta)
+
+            # Mutating an unrelated site to BL must STILL be rejected by generic B-only rule
+            bad_pkg = bytearray(pkg)
+            bad_rep = copy.deepcopy(rep)
+            retire_sites = {c.source_callsite for c in spec.returning_retire.calls}
+            other_site = next(s for s in rep['rewrite']['sites'] if s['offset'] not in retire_sites)
+            b_word = struct.unpack_from('<I', bad_pkg, payload + other_site['offset'])[0]
+            struct.pack_into('<I', bad_pkg, payload + other_site['offset'], b_word | 0x80000000)
+            self._resign_v3(bad_pkg, bad_rep, sdk_path)
+            with self.assertRaisesRegex(ValueError, 'site branch'):
+                pins.verify_package(sdk_path, bad_rep, sdk_fact, sdk_nso, sdk_meta)
+
+        # Without matching contracted source, v3 typed records are rejected
+        sdk_path.write_bytes(pkg)
+        with self.assertRaises(ValueError):
+            pins.verify_package(sdk_path, rep, sdk_fact, sdk_nso, sdk_meta)
+
+    def _resign_v3(self, package, report, path):
+        payload = struct.unpack_from('<Q', package, 112)[0]
+        digest = hashlib.sha256(package[payload:]).digest()
+        package[248:280] = digest
+        report['image_sha256'] = digest.hex()
+        report['package_sha256'] = hashlib.sha256(package).hexdigest()
+        report['callback_audit']['package_sha256'] = report['package_sha256']
+        if 'guest_contract_audit' in report:
+            import android_guest_contract as contract
+            gca = report['guest_contract_audit']
+            gca['package_sha256'] = report['package_sha256']
+            body = {k: v for k, v in gca.items() if k != 'audit_identity_sha256'}
+            gca['audit_identity_sha256'] = contract.audit_identity_sha256(body).hex()
+        path.write_bytes(package)
+
+    def test_taiko_content_validates_v3_512_byte_header_and_table_digests(self):
+        sys.path.insert(0, str(Path(__file__).parent))
+        import android_guest_contract as contract
+        from test_android_guest_contract_v3_dispatch import build_synthetic_v3_sdk
+
+        # Test v3 main (0/0) and v3 sdk (5/2) through taiko_content.validate_package
+        v3_main_pkg, v3_main_rep = android_import.import_module(
+            self.source, 'main', package_version=3,
+            indirect_policy='guarded-host', callback_audit=True, checked_stack=True,
+        )
+        sdk_source, spec = build_synthetic_v3_sdk()
+        with patch.object(contract, 'TAIKO_SDK_GUEST_CONTRACT_SPEC', spec):
+            v3_sdk_pkg, v3_sdk_rep = android_import.import_module(
+                sdk_source, 'sdk', package_version=3,
+                indirect_policy='guarded-host', callback_audit=True, checked_stack=True,
+            )
+        patched_pins = copy.deepcopy(taiko_content.SOURCE_PINS)
+        patched_pins['main'] = dict(
+            bytes=len(self.source),
+            sha256=self.fact['source_sha256'],
+            build_id=self.fact['build_id'],
+        )
+        patched_pins['sdk'] = dict(
+            bytes=len(sdk_source),
+            sha256=hashlib.sha256(sdk_source).hexdigest(),
+            build_id=parse_nso(sdk_source).build_id.hex(),
+        )
+        main_path = self.directory / 'v3_main.dmag'
+        main_path.write_bytes(v3_main_pkg)
+        sdk_path = self.directory / 'v3_sdk.dmag'
+        sdk_path.write_bytes(v3_sdk_pkg)
+        with patch.object(taiko_content, 'SOURCE_PINS', patched_pins):
+            res_main = taiko_content.validate_package(main_path, v3_main_rep)
+            self.assertEqual(res_main['sha256'], v3_main_rep['package_sha256'])
+            res_sdk = taiko_content.validate_package(sdk_path, v3_sdk_rep)
+            self.assertEqual(res_sdk['sha256'], v3_sdk_rep['package_sha256'])
+
+            # Corrupting exact_guest_table_sha256 in v3 header must fail validate_package
+            bad_sdk = bytearray(v3_sdk_pkg)
+            bad_sdk[432] ^= 1
+            bad_rep = copy.deepcopy(v3_sdk_rep)
+            bad_rep['package_sha256'] = hashlib.sha256(bad_sdk).hexdigest()
+            bad_rep['callback_audit']['package_sha256'] = bad_rep['package_sha256']
+            sdk_path.write_bytes(bad_sdk)
+            with self.assertRaises(taiko_content.ContentError):
+                taiko_content.validate_package(sdk_path, bad_rep)
+
 
 if __name__ == '__main__': unittest.main()
+

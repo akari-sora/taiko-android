@@ -557,17 +557,16 @@ bool decode_package_with_audits(const uint8_t* blob,size_t size,const uint8_t* e
     if(error)error->clear();
     if(!out)return fail(error,"missing package output");
     out->reset();
-    if(callback_audit && contract_audit)
-        return fail(error,"callback and guest-contract audits target different package versions");
     if(callback_audit) {
         const auto& audit=*callback_audit;
+        const bool v2=blob && size>=384 && !memcmp(blob,"DMAMOD02",8) && u32(blob+8)==2;
+        const bool v3=blob && size>=512 && !memcmp(blob,"DMAMOD03",8) && u32(blob+8)==3;
         // Bound caller-supplied counts before decoding or allocating a root list.
-        if(!limits_valid(limits) || !blob || size<384 || size>limits.package_bytes ||
+        if(!limits_valid(limits) || !blob || (!v2 && !v3) || size>limits.package_bytes ||
            audit.version!=1 || audit.root_kind!=CallbackRootKind::DefinedSttFunc ||
            (audit.indirect_policy!=CallbackIndirectPolicy::Strict &&
             audit.indirect_policy!=CallbackIndirectPolicy::GuardedHost) ||
            audit.root_count>limits.callback_roots || (audit.root_count && !audit.roots) ||
-           memcmp(blob,"DMAMOD02",8) || u32(blob+8)!=2 ||
            audit.root_count>u64(blob+48)/4)
             return fail(error,"invalid or unsupported trusted callback audit");
         if(!expected_digest || memcmp(audit.package_sha256.data(),expected_digest,32) ||
@@ -1188,6 +1187,18 @@ bool Process::loaded_package_authority(size_t index,LoadedPackageAuthority* out)
     out->capsule_sha256=m.capsule_sha256_;out->capsule_bytes=m.capsule_bytes_;
     out->checked_stack=m.checked_stack_ && p.stack_admitted_ && p.stack_identity_==m.load_identity_;
     out->callback_audited=p.callback_admitted_ && p.callback_identity_==m.load_identity_;
+    out->required_flags=m.required_flags_;
+    out->guest_contract_admitted=m.guest_contract_admitted_ && p.guest_contract_admission_!=nullptr &&
+        p.guest_contract_admission_->package_identity==m.load_identity_ &&
+        p.guest_contract_admission_->audit_identity==m.guest_contract_audit_identity_;
+    out->exact_guest_count=p.exact_guest_records.size();
+    out->returning_retire_count=p.returning_retire_records.size();
+    out->exact_guest_table_sha256=p.exact_guest_table_sha256;
+    out->returning_retire_table_sha256=p.returning_retire_table_sha256;
+    out->final_independent_roots_sha256=p.final_independent_roots_sha256;
+    out->whole_function_ownership_proof_sha256=p.whole_function_ownership_proof_sha256;
+    if(out->guest_contract_admitted)
+        out->guest_contract_audit_identity=m.guest_contract_audit_identity_;
     return true;
 }
 bool Process::loaded_callback_roots_match(size_t index,const TrustedCallbackAudit& audit) const {

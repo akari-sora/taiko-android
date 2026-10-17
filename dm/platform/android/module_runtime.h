@@ -156,6 +156,13 @@ struct LoadedPackageAuthority {
     std::array<uint8_t,32> capsule_sha256{};
     uint64_t capsule_bytes = 0;
     bool checked_stack = false, callback_audited = false;
+    uint32_t required_flags = 0;
+    bool guest_contract_admitted = false;
+    uint64_t exact_guest_count = 0, returning_retire_count = 0;
+    std::array<uint8_t,32> exact_guest_table_sha256{}, returning_retire_table_sha256{};
+    std::array<uint8_t,32> final_independent_roots_sha256{};
+    std::array<uint8_t,32> whole_function_ownership_proof_sha256{};
+    std::array<uint8_t,32> guest_contract_audit_identity{};
 };
 class Process {
 public:

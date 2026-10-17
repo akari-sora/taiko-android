@@ -979,7 +979,7 @@ def import_module(source, name, *, package_version=1, profile=None, indirect_pol
         raise ImportError('guarded host transfers require package version 2 or 3')
     if not isinstance(callback_audit, bool):
         raise ImportError('callback audit selection must be explicit boolean')
-    if callback_audit and package_version != 2:
+    if callback_audit and package_version not in (2, 3):
         raise ImportError('callback audit receipt requires package version 2')
     if not isinstance(checked_stack, bool) or (checked_stack and package_version not in (2, 3)):
         raise ImportError('checked-stack mode requires explicit boolean and package version 2 or 3')
@@ -1063,7 +1063,7 @@ def import_directory(input_directory, output_directory, modules=('main', 'sdk'),
         raise ImportError('guarded host transfers require package version 2 or 3')
     if not isinstance(callback_audit, bool):
         raise ImportError('callback audit selection must be explicit boolean')
-    if callback_audit and package_version != 2:
+    if callback_audit and package_version not in (2, 3):
         raise ImportError('callback audit receipt requires package version 2')
     if not isinstance(checked_stack, bool) or (checked_stack and package_version not in (2, 3)):
         raise ImportError('checked-stack mode requires explicit boolean and package version 2 or 3')

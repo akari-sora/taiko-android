@@ -29,12 +29,15 @@ bool source_matches(const TaikoSourcePin& pin,const SourceIdentity& expected){
         digest(pin.source_sha256,expected.sha256) && digest(pin.build_id,expected.build_id) && nonzero(pin.decoded_sha256);
 }
 bool valid_pins(const TaikoBuildPins* pins){
-    if(!pins || pins->schema!=1 || !named(pins->build,"Taiko/01002460135A4000/Stock-v1") ||
+    if(!pins || pins->schema!=2 || !named(pins->build,"Taiko/01002460135A4000/Stock-v1") ||
        !named(pins->program_id,"01002460135A4000") ||
        !digest(pins->npdm_sha256,"afd3aade95cbcc607759eb677b67082193719a701a5b0cc8ed78ac33b5c65150") ||
        !source_matches(pins->rtld,rtld_identity) || !pins->sources || pins->source_count!=3 ||
        !pins->modules || pins->module_count!=3 || !nonzero(pins->source_audit_sha256) ||
        !nonzero(pins->import_manifest_sha256))return false;
+    constexpr uint32_t allowed_flags=1u|DM_MODULE_REQUIRE_DIAG_ABORT_V1|
+        DM_MODULE_REQUIRE_EXACT_GUEST_V1|DM_MODULE_REQUIRE_RETURNING_RETIRE_V1;
+    constexpr uint32_t v3_contract_bits=DM_MODULE_REQUIRE_EXACT_GUEST_V1|DM_MODULE_REQUIRE_RETURNING_RETIRE_V1;
     for(size_t i=0;i<3;++i){
         const auto& source=pins->sources[i];const auto& module=pins->modules[i];const auto& audit=module.callback_audit;
         if(!source_matches(source,identities[i]) || !named(module.name,identities[i].name) ||
@@ -42,9 +45,29 @@ bool valid_pins(const TaikoBuildPins* pins){
            !nonzero(module.image_sha256) || audit.version!=1 || audit.package_sha256!=module.package_sha256 ||
            audit.source_sha256!=source.source_sha256 || audit.root_kind!=CallbackRootKind::DefinedSttFunc ||
            audit.indirect_policy!=CallbackIndirectPolicy::GuardedHost || !audit.roots || !audit.root_count ||
-           audit.root_count>(1u<<20))return false;
+           audit.root_count>(1u<<20) || (module.required_flags&~allowed_flags))return false;
         for(size_t root=1;root<audit.root_count;++root)
             if(audit.roots[root-1]>=audit.roots[root])return false;
+        const uint32_t new_bits=module.required_flags&v3_contract_bits;
+        const auto& gca=module.guest_contract_audit;
+        if(i<2){
+            if(new_bits!=0 || module.exact_guest_count!=0 || nonzero(module.exact_guest_table_sha256) ||
+               module.returning_retire_count!=0 || nonzero(module.returning_retire_table_sha256) ||
+               gca.exact_guest_count!=0 || gca.returning_retire_count!=0 ||
+               nonzero(gca.audit_identity_sha256) || nonzero(gca.exact_guest_table_sha256) ||
+               nonzero(gca.returning_retire_table_sha256) || nonzero(gca.final_independent_roots_sha256) ||
+               nonzero(gca.whole_function_ownership_proof_sha256))return false;
+        } else {
+            if(new_bits!=v3_contract_bits || module.exact_guest_count!=5 || !nonzero(module.exact_guest_table_sha256) ||
+               module.returning_retire_count!=2 || !nonzero(module.returning_retire_table_sha256) ||
+               gca.schema!=1 || gca.flags!=0 || gca.package_sha256!=module.package_sha256 ||
+               gca.source_sha256!=source.source_sha256 || gca.build_id!=source.build_id ||
+               !nonzero(gca.toolset_recipe_sha256) || !nonzero(gca.audit_identity_sha256) ||
+               gca.exact_guest_count!=5 || gca.exact_guest_table_sha256!=module.exact_guest_table_sha256 ||
+               gca.returning_retire_count!=2 || gca.returning_retire_table_sha256!=module.returning_retire_table_sha256 ||
+               !nonzero(gca.final_independent_roots_sha256) || !nonzero(gca.whole_function_ownership_proof_sha256))
+                return false;
+        }
     }
     return true;
 }
@@ -64,16 +87,52 @@ bool taiko_bringup_graph(const Process& process,std::string* error){
             return fail(error,"Taiko stock startup mapped module is missing");
         const auto& package=*process.modules()[i]->package;const auto& pin=pins->modules[i];
         const auto& source=pins->sources[i];LoadedPackageAuthority frozen{};
+        const uint32_t expected_flags=pin.required_flags&~1u;
         if(!process.loaded_package_authority(i,&frozen) || !frozen.checked_stack || !frozen.callback_audited ||
            frozen.capsule_sha256!=pin.package_sha256 || frozen.capsule_bytes!=pin.package_bytes ||
-           package.name!=pin.name || package.wire_version!=2 || package.profile_class || package.profile ||
+           (frozen.required_flags&~1u)!=expected_flags ||
+           frozen.exact_guest_count!=pin.exact_guest_count ||
+           frozen.exact_guest_table_sha256!=pin.exact_guest_table_sha256 ||
+           frozen.returning_retire_count!=pin.returning_retire_count ||
+           frozen.returning_retire_table_sha256!=pin.returning_retire_table_sha256 ||
+           package.name!=pin.name || package.wire_version!=3 || !package.checked_stack ||
+           (package.required_flags&~1u)!=expected_flags ||
+           package.exact_guest_records.size()!=pin.exact_guest_count ||
+           package.exact_guest_table_sha256!=pin.exact_guest_table_sha256 ||
+           package.returning_retire_records.size()!=pin.returning_retire_count ||
+           package.returning_retire_table_sha256!=pin.returning_retire_table_sha256 ||
+           package.profile_class || package.profile ||
            package.build_id!=source.build_id || package.source_sha256!=source.source_sha256 ||
            package.image_sha256!=pin.image_sha256 || package.bytes.size()!=pin.image_bytes ||
            !package.parameters.empty() || !process.loaded_callback_roots_match(i,pin.callback_audit) ||
            nonzero(package.profile_digest))return fail(error,"Taiko stock capsule/source/stack/callback identity mismatch");
-        for(const auto& gate:package.gates)
+        if(i<2){
+            if(frozen.guest_contract_admitted || nonzero(frozen.guest_contract_audit_identity) ||
+               nonzero(frozen.final_independent_roots_sha256) || nonzero(frozen.whole_function_ownership_proof_sha256) ||
+               nonzero(package.final_independent_roots_sha256) || nonzero(package.whole_function_ownership_proof_sha256))
+                return fail(error,"Taiko stock main/subsdk0 cannot carry guest-contract authority");
+        } else {
+            const auto& gca=pin.guest_contract_audit;
+            if(!frozen.guest_contract_admitted ||
+               frozen.guest_contract_audit_identity!=gca.audit_identity_sha256 ||
+               frozen.final_independent_roots_sha256!=gca.final_independent_roots_sha256 ||
+               frozen.whole_function_ownership_proof_sha256!=gca.whole_function_ownership_proof_sha256 ||
+               package.final_independent_roots_sha256!=gca.final_independent_roots_sha256 ||
+               package.whole_function_ownership_proof_sha256!=gca.whole_function_ownership_proof_sha256)
+                return fail(error,"Taiko stock sdk guest-contract authority mismatch");
+        }
+        size_t exact_gates=0;
+        for(const auto& gate:package.gates){
             if(gate.kind==DM_GUEST_OBSERVATION || (gate.kind==DM_GUEST_SVC && gate.argument>=0x80))
                 return fail(error,"Taiko stock startup rejects observation profiles and private CUTS");
+            if(gate.kind==DM_GUEST_EXACT_GUEST){
+                if(i<2 || gate.argument!=17)
+                    return fail(error,"Taiko stock startup rejects unauthorized exact-guest gate");
+                ++exact_gates;
+            }
+        }
+        if(exact_gates!=pin.exact_guest_count)
+            return fail(error,"Taiko stock exact-guest gate count mismatch");
     }
     return true;
 }
