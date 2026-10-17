@@ -19,7 +19,7 @@ from android_diag_abort import MODULE_REQUIRE_DIAG_ABORT_V1
 from android_guest_contract import (HEADER_SIZE_V3, MAGIC_V3,
     DM_MODULE_REQUIRE_EXACT_GUEST_V1, DM_MODULE_REQUIRE_RETURNING_RETIRE_V1,
     EXACT_GUEST_STRIDE_V1, RETURNING_RETIRE_STRIDE_V1,
-    pack_exact_guest_table, pack_returning_retire_table, table_digest)
+    build_trusted_audit_v1, pack_exact_guest_table, pack_returning_retire_table, table_digest)
 from android_rewrite import (ABI, INDIRECT_HOST, FatalWord, RewriteError, rewrite, site_kind,
                              indirect_register, is_fatal_word, is_fatal_instruction, stack_check_operation, has18,
                              byte_jump_table,halfword_jump_table,readonly_guest_table,x18_jump_table,native_transfer_plan)
@@ -1013,7 +1013,8 @@ def import_module(source, name, *, package_version=1, profile=None, indirect_pol
                                           for item in code_report.get('versioned_checked_calls', ())},
                     checked_call_forest_offsets=tuple(caller['offset'] for caller in forest_contract['callers']) if forest_contract else (),
                     checked_call_forest_targets=forest_contract['targets'] if forest_contract else (),
-                    native_transfer_candidates={row['offset']:row['target'] for row in code_report['native_transfer_candidates']})
+                    native_transfer_candidates={row['offset']:row['target'] for row in code_report['native_transfer_candidates']},
+                    guest_contract_source=bytes(source) if package_version == 3 and (checked_stack or indirect_policy == 'guarded-host' or name == 'sdk') else None)
     package = make_package(name, nso, metadata, image, patch_offset, package_version)
     report = {'name': name, 'source_sha256': nso.source_sha256.hex(), 'build_id': nso.build_id.hex(),
               'image_sha256': hashlib.sha256(image.bytes).hexdigest(), 'package_sha256': hashlib.sha256(package).hexdigest(),
@@ -1035,6 +1036,17 @@ def import_module(source, name, *, package_version=1, profile=None, indirect_pol
             'callback_root_kind': 'defined-stt-func',
             'callback_roots': audited_callback_roots(nso, metadata, code_ranges, code_report),
         }
+    if image.guest_contract is not None:
+        report['guest_contract_audit'] = build_trusted_audit_v1(
+            package,
+            source_sha256=nso.source_sha256,
+            build_id=nso.build_id,
+            exact_guest_records=image.exact_guest_records,
+            returning_retire_records=image.returning_retire_records,
+            toolset_recipe_digest=image.guest_contract.toolset_recipe_sha256,
+            final_independent_roots_digest=image.guest_contract.final_independent_roots_sha256,
+            ownership_proof_digest=image.guest_contract.ownership_proof_sha256,
+        )
     return package, report
 
 

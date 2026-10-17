@@ -137,10 +137,13 @@ static bool prepare_image(const DmGuestImage& image, DmGuestLoadedImage* out,
         if ((gate.kind == DM_GUEST_SVC && gate.argument > 65535) ||
             (gate.kind == DM_GUEST_TIMER && gate.argument > 31) ||
             (gate.kind == DM_GUEST_INDIRECT_HOST && (gate.argument > 30 || gate.argument == 18)) ||
+            (gate.kind == DM_GUEST_EXACT_GUEST && gate.argument != 17) ||
             (gate.kind == DM_GUEST_STACK_CHECK && !dm_android_decode_stack_check(gate.argument)) ||
             (gate.kind != DM_GUEST_SVC && gate.kind != DM_GUEST_TIMER &&
              !(profiled && gate.kind == DM_GUEST_OBSERVATION) &&
-             !(canonical_v2 && (gate.kind == DM_GUEST_INDIRECT_HOST || gate.kind == DM_GUEST_STACK_CHECK))))
+             !(canonical_v2 && (gate.kind == DM_GUEST_INDIRECT_HOST ||
+                                gate.kind == DM_GUEST_STACK_CHECK ||
+                                gate.kind == DM_GUEST_EXACT_GUEST))))
             return fail(error, error_size, "invalid dispatch kind or argument");
         uint32_t instruction;
         memcpy(&instruction, image.bytes + gate.return_offset - 4, sizeof(instruction));

@@ -149,14 +149,14 @@ bool static_plt_got(const ModulePackage& p,uint64_t plt,uint64_t* got) {
        !in_segment(p,static_cast<uint64_t>(value),8,DM_GUEST_READ|DM_GUEST_WRITE))return false;
     *got=static_cast<uint64_t>(value);return true;
 }
-const DmGuestGate* diag_plt_gate(const ModulePackage& p,uint64_t plt) {
-    if(p.wire_version!=2 || p.gate_provenance.size()!=p.gates.size() ||
+const DmGuestGate* plt_kind_gate(const ModulePackage& p,uint64_t plt,uint32_t expected_kind) {
+    if((p.wire_version!=2 && p.wire_version!=3) || p.gate_provenance.size()!=p.gates.size() ||
        !range(plt,16,p.original_size) || !range(plt,16,p.bytes.size()) ||
        !in_segment(p,plt,16,DM_GUEST_READ|DM_GUEST_EXEC))return nullptr;
     for(size_t i=0;i<p.gates.size();++i) {
         const auto& gate=p.gates[i];const auto& provenance=p.gate_provenance[i];
         if(provenance.original_offset!=plt+12)continue;
-        if(gate.kind!=DM_GUEST_INDIRECT_HOST || gate.argument!=17 ||
+        if(gate.kind!=expected_kind || gate.argument!=17 ||
            provenance.kind!=gate.kind || provenance.argument!=gate.argument ||
            provenance.return_offset!=gate.return_offset || provenance.flags ||
            provenance.original_word!=0xd61f0220u)return nullptr;
@@ -189,6 +189,57 @@ const DmGuestGate* diag_plt_gate(const ModulePackage& p,uint64_t plt) {
         return nullptr;
     }
     return nullptr;
+}
+const DmGuestGate* diag_plt_gate(const ModulePackage& p,uint64_t plt) {
+    return plt_kind_gate(p,plt,DM_GUEST_INDIRECT_HOST);
+}
+const DmGuestGate* exact_plt_gate(const ModulePackage& p,uint64_t plt) {
+    return (p.wire_version==3 && p.checked_stack)?plt_kind_gate(p,plt,DM_GUEST_EXACT_GUEST):nullptr;
+}
+bool validate_v3_lowered_premap(const ModulePackage& p) {
+    if(p.wire_version!=3 || !p.checked_stack ||
+       p.exact_guest_records.size()!=5 || p.returning_retire_records.size()!=2)return false;
+    for(size_t i=0;i<p.returning_retire_records.size();++i) {
+        const auto& r=p.returning_retire_records[i];
+        if(r.stub_extent!=8 || !range(r.source_callsite,4,p.original_size) ||
+           !range(r.original_target,4,p.original_size) ||
+           !in_segment(p,r.source_callsite,4,DM_GUEST_READ|DM_GUEST_EXEC) ||
+           !in_segment(p,r.original_target,4,DM_GUEST_READ|DM_GUEST_EXEC) ||
+           r.reserved_stub_offset<p.original_size || !range(r.reserved_stub_offset,8,p.bytes.size()) ||
+           !in_segment(p,r.reserved_stub_offset,8,DM_GUEST_READ|DM_GUEST_EXEC))return false;
+        for(size_t j=0;j<i;++j)
+            if(overlaps({r.reserved_stub_offset,8},{p.returning_retire_records[j].reserved_stub_offset,8}))
+                return false;
+        const uint32_t bl=read<uint32_t>(p,r.source_callsite);
+        const int64_t bl_dist=static_cast<int64_t>(static_cast<int32_t>(bl<<6)>>6)*4;
+        if((bl&0xfc000000u)!=0x94000000u ||
+           static_cast<int64_t>(r.source_callsite)+bl_dist!=static_cast<int64_t>(r.reserved_stub_offset))
+            return false;
+        const uint32_t clrex=read<uint32_t>(p,r.reserved_stub_offset);
+        const uint32_t b=read<uint32_t>(p,r.reserved_stub_offset+4);
+        const int64_t b_dist=static_cast<int64_t>(static_cast<int32_t>(b<<6)>>6)*4;
+        if(clrex!=0xd5033f5fu || (b&0xfc000000u)!=0x14000000u ||
+           static_cast<int64_t>(r.reserved_stub_offset+4)+b_dist!=static_cast<int64_t>(r.original_target))
+            return false;
+    }
+    size_t kind6_count=0;
+    for(const auto& g:p.gates)if(g.kind==DM_GUEST_EXACT_GUEST)++kind6_count;
+    if(kind6_count!=p.exact_guest_records.size())return false;
+    for(size_t i=0;i<p.exact_guest_records.size();++i) {
+        const auto& x=p.exact_guest_records[i];
+        if(x.original_br_offset<12 || !range(x.function_start,x.function_end-x.function_start,p.original_size) ||
+           !in_segment(p,x.function_start,x.function_end-x.function_start,DM_GUEST_READ|DM_GUEST_EXEC))
+            return false;
+        uint64_t got=0;
+        if(!static_plt_got(p,x.original_br_offset-12,&got) || got!=x.got_offset)return false;
+        const DmGuestGate* gate=exact_plt_gate(p,x.original_br_offset-12);
+        if(!gate || gate->return_offset!=x.gate_return_offset)return false;
+        for(size_t j=0;j<i;++j)
+            if(p.exact_guest_records[j].got_offset==x.got_offset ||
+               p.exact_guest_records[j].gate_return_offset==x.gate_return_offset)
+                return false;
+    }
+    return true;
 }
 }
 
@@ -241,20 +292,38 @@ namespace {
 // the public wrapper for legacy packages. Checked mappings need the Process
 // entry registry before any instruction, including a leaf without gates.
 bool prepare_validated_package(ModulePackage& package,DmGuestLoadedImage* out,char* error,size_t error_size) {
-    if(package.wire_version==3) {
-        if(error && error_size) std::snprintf(error,error_size,"DMAMOD03 execution is unavailable in the host-only foundation");
-        if(out) *out={};
-        return false;
-    }
     const char* detail=nullptr;
-    if(!validate_observation_profile(package,&detail)) {
+    if(package.wire_version==3) {
+        if(!validate_v3_lowered_premap(package)) {
+            if(error && error_size) std::snprintf(error,error_size,"DMAMOD03 execution is unavailable in the host-only foundation");
+            if(out) *out={};
+            return false;
+        }
+        ModulePackage compatible=package;
+        compatible.wire_version=2;
+        compatible.required_flags&=DM_MODULE_REQUIRE_DIAG_ABORT_V1;
+        compatible.exact_guest_records.clear();compatible.returning_retire_records.clear();
+        compatible.exact_guest_table_sha256={};compatible.returning_retire_table_sha256={};
+        compatible.final_independent_roots_sha256={};compatible.whole_function_ownership_proof_sha256={};
+        compatible.gates.clear();compatible.gate_provenance.clear();
+        for(size_t i=0;i<package.gates.size();++i)if(package.gates[i].kind!=DM_GUEST_EXACT_GUEST) {
+            compatible.gates.push_back(package.gates[i]);
+            compatible.gate_provenance.push_back(package.gate_provenance[i]);
+        }
+        if(!validate_observation_profile(compatible,&detail)) {
+            if(error && error_size) std::snprintf(error,error_size,"%s",detail?detail:"invalid canonical profile");
+            if(out) *out={};
+            return false;
+        }
+        package.profile=compatible.profile;
+    } else if(!validate_observation_profile(package,&detail)) {
         if(error && error_size) std::snprintf(error,error_size,"%s",detail?detail:"invalid canonical profile");
         if(out) *out={};
         return false;
     }
     package.refresh_view();
     return dm_android_guest_prepare_package_image(package.image,out,error,error_size,
-                                                   package.wire_version==2,package.profile!=nullptr);
+                                                   package.wire_version>=2,package.profile!=nullptr);
 }
 }
 bool prepare_package(ModulePackage& package,DmGuestLoadedImage* out,char* error,size_t error_size) {
@@ -582,6 +651,7 @@ struct ModuleDynamic {
     std::unordered_map<std::string,size_t> exports;
     std::unordered_map<std::string,size_t> definitions;
     size_t dynamic=0, symtab=0, strings=0, string_bytes=0, init=0, init_array=0, init_array_bytes=0;
+    size_t jmprel_offset_index=0, jmprel_count=0;
 };
 
 namespace {
@@ -724,7 +794,9 @@ bool parse_dynamic(const ModulePackage& p, ModuleDynamic* out, std::string* erro
        (rela[1].size && get(DT_PLTREL)!=DT_RELA) || overlaps(rela[0],rela[1]))
         return fail(error,"invalid RELA dynamic tags or overlapping tables");
     std::unordered_set<size_t> targets;
-    for(const Span table:rela) {
+    for(unsigned table_idx=0;table_idx<2;++table_idx) {
+        const Span table=rela[table_idx];
+        if(table_idx==1) out->jmprel_offset_index=out->relocations.size();
         if(table.size && ((table.offset&7) || table.size%sizeof(Elf64_Rela) ||
                           !in_original(p,table.offset,table.size)))
             return fail(error,"invalid RELA table bounds");
@@ -748,6 +820,7 @@ bool parse_dynamic(const ModulePackage& p, ModuleDynamic* out, std::string* erro
                 return fail(error,"invalid RELATIVE relocation symbol or addend");
             out->relocations.push_back(r);
         }
+        if(table_idx==1) out->jmprel_count=out->relocations.size()-out->jmprel_offset_index;
     }
     if(tags.count(DT_INIT)) {
         const uint64_t init=get(DT_INIT);
@@ -864,9 +937,14 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
                 if(package->guest_contract_admission_->package_identity!=package_identity(*package))
                     return fail(error,"DMAMOD03 guest-contract admission is stale or package data changed");
             }
+            if(!validate_v3_lowered_premap(*package))
+                return fail(error,"DMAMOD03 execution is unavailable in the host-only foundation");
         }
-        if(contains_v3)
-            return fail(error,"DMAMOD03 execution is unavailable in the host-only foundation");
+        if(contains_v3) {
+            for(const auto& package:packages)
+                if(!package || !package->checked_stack || !package->stack_admitted_)
+                    return fail(error,"DMAMOD03 execution is unavailable in the host-only foundation");
+        }
         std::vector<std::unique_ptr<LoadedModule>> candidate;
         std::unordered_set<std::string> names;
         size_t total=0;
@@ -876,8 +954,11 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
                !package->bytes.size() || package->bytes.size()>1024u*1024u*1024u-total)
                 return fail(error,"invalid, duplicate or excessive process modules (aggregate 1 GiB limit)");
             total+=package->bytes.size();
-            if((package->required_flags&~DM_MODULE_REQUIRE_DIAG_ABORT_V1) ||
-               (package->required_flags && (!package->checked_stack || package->wire_version!=2)))
+            const uint32_t allowed_required=package->wire_version==2 ? DM_MODULE_REQUIRE_DIAG_ABORT_V1 :
+                package->wire_version==3 ? (DM_MODULE_REQUIRE_DIAG_ABORT_V1|
+                    DM_MODULE_REQUIRE_EXACT_GUEST_V1|DM_MODULE_REQUIRE_RETURNING_RETIRE_V1) : 0u;
+            if((package->required_flags&~allowed_required) ||
+               (package->required_flags && !package->checked_stack))
                 return fail(error,"invalid required diagnostic ABI flags");
             if(package->checked_stack!=checked || (package->checked_stack &&
                (!package->stack_admitted_ || package->stack_identity_!=package_identity(*package))))
@@ -897,8 +978,36 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
             m->capsule_verified_=m->package->capsule_verified_;
             m->capsule_bytes_=m->package->capsule_bytes_;
             m->capsule_sha256_=m->package->capsule_sha256_;
+            m->guest_contract_admitted_=m->package->guest_contract_admission_!=nullptr &&
+                m->package->guest_contract_admission_->package_identity==m->load_identity_;
+            if(m->guest_contract_admitted_)
+                m->guest_contract_audit_identity_=m->package->guest_contract_admission_->audit_identity;
             m->dynamic=std::make_unique<ModuleDynamic>();
             if(!parse_dynamic(*m->package,m->dynamic.get(),error)) return false;
+            if(m->package->wire_version==3) {
+                for(const auto& x:m->package->exact_guest_records) {
+                    if(x.relocation_index>=m->dynamic->jmprel_count || x.relocation_type!=1026 ||
+                       x.relocation_addend!=0 || !x.symbol_index || x.symbol_index>=m->dynamic->symbols.size())
+                        return fail(error,m->package->name+": exact-guest relocation index or type mismatch");
+                    const auto& rel=m->dynamic->relocations[m->dynamic->jmprel_offset_index+x.relocation_index];
+                    if(rel.r_offset!=x.got_offset || ELF64_R_TYPE(rel.r_info)!=x.relocation_type ||
+                       ELF64_R_SYM(rel.r_info)!=x.symbol_index || rel.r_addend!=x.relocation_addend)
+                        return fail(error,m->package->name+": exact-guest JMPREL entry disagrees with record");
+                    const auto& sym=m->dynamic->symbols[x.symbol_index];
+                    const char* sname=reinterpret_cast<const char*>(m->package->bytes.data()+m->dynamic->strings+sym.st_name);
+                    uint8_t sname_sha[32]{};
+                    module_sha256(reinterpret_cast<const uint8_t*>(sname),std::strlen(sname),sname_sha);
+                    if(sym.st_name!=x.symbol_name_offset || std::strlen(sname)!=x.symbol_name_length ||
+                       std::memcmp(sname_sha,x.symbol_name_sha256.data(),32) ||
+                       ELF64_ST_TYPE(sym.st_info)!=x.symbol_type || x.symbol_type!=STT_FUNC ||
+                       ELF64_ST_BIND(sym.st_info)!=x.symbol_binding ||
+                       (sym.st_other&3u)!=x.symbol_visibility ||
+                       sym.st_shndx!=x.symbol_section_index || !sym.st_shndx || sym.st_shndx==SHN_ABS ||
+                       sym.st_value!=x.symbol_value || sym.st_size!=x.symbol_size ||
+                       x.same_module_target_offset!=sym.st_value)
+                        return fail(error,m->package->name+": exact-guest dynamic symbol disagrees with record");
+                }
+            }
             char detail[256];
             if(!prepare_validated_package(*m->package,&m->mapping,detail,sizeof(detail)))
                 return fail(error,m->package->name+": "+detail);
@@ -906,10 +1015,31 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
         }
         for(const auto& m:candidate) {
             size_t required_bindings=0;
-            for(const auto& r:m->dynamic->relocations) {
+            size_t exact_bindings=0;
+            for(size_t rel_pos=0;rel_pos<m->dynamic->relocations.size();++rel_pos) {
+                const auto& r=m->dynamic->relocations[rel_pos];
                 const auto& s=m->dynamic->symbols[ELF64_R_SYM(r.r_info)];
                 const char* name=symbol_name(*m,s); uintptr_t address=0,value=0;
-                if((m->required_flags_&DM_MODULE_REQUIRE_DIAG_ABORT_V1) &&
+                const ExactGuestRecordV1* exact_rec=nullptr;
+                if(m->package->wire_version==3) {
+                    for(const auto& x:m->package->exact_guest_records)
+                        if(x.got_offset==r.r_offset) { exact_rec=&x; break; }
+                }
+                if(exact_rec) {
+                    if(rel_pos<m->dynamic->jmprel_offset_index ||
+                       rel_pos-m->dynamic->jmprel_offset_index!=exact_rec->relocation_index ||
+                       ELF64_R_TYPE(r.r_info)!=1026 || r.r_addend!=0 || !s.st_shndx || s.st_shndx==SHN_ABS)
+                        return fail(error,m->package->name+": invalid exact-guest relocation binding");
+                    uintptr_t forced_addr=0;
+                    if(resolver && resolver(name,true,&forced_addr,context))
+                        return fail(error,m->package->name+": forced host override is forbidden for exact-guest symbol "+name);
+                    address=definition(*m,s);
+                    const uintptr_t expected=reinterpret_cast<uintptr_t>(m->mapping.base)+exact_rec->same_module_target_offset;
+                    if(address!=expected)
+                        return fail(error,m->package->name+": exact-guest definition disagrees with target offset");
+                    ++exact_bindings;
+                }
+                else if((m->required_flags_&DM_MODULE_REQUIRE_DIAG_ABORT_V1) &&
                    !std::strcmp(name,DM_DIAG_ABORT_IMPL_SYMBOL)) {
                     const uintptr_t canonical=reinterpret_cast<uintptr_t>(&dm_android_diag_abort_entry);
                     if(ELF64_R_TYPE(r.r_info)!=1026 || r.r_addend || !canonical || !resolver ||
@@ -950,11 +1080,14 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
             }
             if((m->required_flags_&DM_MODULE_REQUIRE_DIAG_ABORT_V1) && !required_bindings)
                 return fail(error,m->package->name+": required diagnostic abort ABI has no relocation");
+            if(m->package->wire_version==3 && exact_bindings!=m->package->exact_guest_records.size())
+                return fail(error,m->package->name+": incomplete exact-guest relocation bindings");
         }
         std::unordered_map<uint64_t,FrozenGate> candidate_gates;
         std::unordered_set<uint64_t> candidate_callback_roots;
         std::unordered_set<uint32_t> observation_ids;
-        for(const auto& m:candidate) {
+        for(size_t mod_idx=0;mod_idx<candidate.size();++mod_idx) {
+            const auto& m=candidate[mod_idx];
             const uint64_t base=reinterpret_cast<uintptr_t>(m->mapping.base);
             if(m->package->callback_admitted_) for(uint64_t root:m->package->callback_roots_) {
                 if(root>UINT64_MAX-base || !candidate_callback_roots.insert(base+root).second)
@@ -966,9 +1099,24 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
                    (!m->package->profile || strcmp(m->package->profile->module,"main") ||
                     !observation_ids.insert(gate.argument).second))
                     return fail(error,"ambiguous observation namespace or duplicate ID");
-                const bool v2=m->package->wire_version==2;
+                const bool v2=m->package->wire_version>=2;
                 const GateProvenance provenance=v2?m->package->gate_provenance[i]:GateProvenance{};
                 uintptr_t required_target=0;
+                uint64_t exact_guest_target=0;
+                if(gate.kind==DM_GUEST_EXACT_GUEST) {
+                    if(m->package->wire_version!=3 || !m->checked_stack_ || !m->guest_contract_admitted_)
+                        return fail(error,"exact-guest gate requires admitted checked v3 module");
+                    const ExactGuestRecordV1* match=nullptr;
+                    for(const auto& x:m->package->exact_guest_records)
+                        if(x.gate_return_offset==gate.return_offset) { match=&x; break; }
+                    if(!match || match->same_module_target_offset>UINT64_MAX-base)
+                        return fail(error,"exact-guest gate has no matching contract record");
+                    exact_guest_target=base+match->same_module_target_offset;
+                    uint64_t got_value=0;
+                    std::memcpy(&got_value,static_cast<const uint8_t*>(m->mapping.base)+match->got_offset,8);
+                    if(got_value!=exact_guest_target)
+                        return fail(error,"exact-guest GOT slot does not match frozen target");
+                }
                 if((m->required_flags_&DM_MODULE_REQUIRE_DIAG_ABORT_V1) && provenance.original_offset>=12) {
                     uint64_t got=0;
                     if(static_plt_got(*m->package,provenance.original_offset-12,&got))
@@ -977,7 +1125,8 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
                                !std::strcmp(symbol_name(*m,m->dynamic->symbols[ELF64_R_SYM(relocation.r_info)]),DM_DIAG_ABORT_IMPL_SYMBOL))
                                 required_target=reinterpret_cast<uintptr_t>(&dm_android_diag_abort_entry);
                 }
-                if(!candidate_gates.emplace(base+gate.return_offset,FrozenGate{gate,provenance,v2,m->checked_stack_,required_target}).second)
+                if(!candidate_gates.emplace(base+gate.return_offset,
+                    FrozenGate{gate,provenance,v2,m->checked_stack_,required_target,exact_guest_target,mod_idx,m->load_identity_}).second)
                     return fail(error,"duplicate absolute process gate");
             }
         }
@@ -1142,6 +1291,28 @@ bool Process::guarded_host_site(uint64_t return_pc,const DmGuestGate* gate) cons
     const auto& g=found->second.gate;const auto& p=found->second.provenance;
     return g.kind==DM_GUEST_INDIRECT_HOST && g.argument<31 && g.argument!=18 &&
            p.kind==g.kind && p.argument==g.argument && p.return_offset==g.return_offset && !p.flags;
+}
+bool Process::exact_guest_site(uint64_t return_pc,const DmGuestGate* gate,uint64_t live_x17,uint64_t generation) const {
+    if(!gate || !generation || generation!=load_generation_ || !checked_stack_)return false;
+    const auto found=gates_.find(return_pc);
+    if(found==gates_.end() || gate!=&found->second.gate)return false;
+    const auto& f=found->second;
+    if(!f.canonical_v2 || !f.checked_stack || f.gate.kind!=DM_GUEST_EXACT_GUEST || f.gate.argument!=17)return false;
+    if(f.provenance.kind!=f.gate.kind || f.provenance.argument!=f.gate.argument ||
+       f.provenance.return_offset!=f.gate.return_offset || f.provenance.flags ||
+       f.provenance.original_word!=0xd61f0220u)return false;
+    if(!live_x17 || (live_x17&3) || !f.exact_guest_target || live_x17!=f.exact_guest_target)return false;
+    if(f.module_index>=modules_.size() || !modules_[f.module_index] || !modules_[f.module_index]->package)return false;
+    const auto& m=*modules_[f.module_index];const auto& p=*m.package;
+    if(!m.mapping.base || !m.mapping.sealed || !m.checked_stack_ || !p.checked_stack || p.wire_version!=3)return false;
+    if(!m.guest_contract_admitted_ || !p.guest_contract_admission_ ||
+       m.load_identity_!=f.package_identity ||
+       p.guest_contract_admission_->package_identity!=m.load_identity_ ||
+       p.guest_contract_admission_->audit_identity!=m.guest_contract_audit_identity_ ||
+       package_identity(p)!=m.load_identity_)return false;
+    const uint64_t base=reinterpret_cast<uintptr_t>(m.mapping.base);
+    if(live_x17<base || live_x17-base>=p.original_size)return false;
+    return in_segment(p,live_x17-base,4,DM_GUEST_READ|DM_GUEST_EXEC);
 }
 bool Process::static_main_import_caller(uint64_t lr,uintptr_t target,const char* symbol,uint64_t* callsite) const {
     if(callsite)*callsite=0;

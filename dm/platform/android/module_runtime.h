@@ -149,6 +149,8 @@ private:
     bool capsule_verified_ = false;
     uint64_t capsule_bytes_ = 0;
     std::array<uint8_t,32> capsule_sha256_{};
+    bool guest_contract_admitted_ = false;
+    std::array<uint8_t,32> guest_contract_audit_identity_{};
 };
 struct LoadedPackageAuthority {
     std::array<uint8_t,32> capsule_sha256{};
@@ -177,6 +179,7 @@ public:
                           InitializerOrder order = InitializerOrder::Forward);
     static const DmGuestGate* gate_resolver(void* context, uint64_t return_pc);
     bool guarded_host_site(uint64_t return_pc, const DmGuestGate* gate) const;
+    bool exact_guest_site(uint64_t return_pc, const DmGuestGate* gate, uint64_t live_x17, uint64_t generation) const;
     bool stack_check_site(uint64_t return_pc,const DmGuestGate* gate) const;
     // Structural source/relocation proof, not original-game authority. Only a
     // direct original BL through the same module's standard static PLT passes.
@@ -209,7 +212,16 @@ public:
     bool loaded_callback_roots_match(size_t index, const TrustedCallbackAudit&) const;
 private:
     std::vector<std::unique_ptr<LoadedModule>> modules_;
-    struct FrozenGate { DmGuestGate gate; GateProvenance provenance; bool canonical_v2; bool checked_stack; uintptr_t required_target=0; };
+    struct FrozenGate {
+        DmGuestGate gate;
+        GateProvenance provenance;
+        bool canonical_v2;
+        bool checked_stack;
+        uintptr_t required_target = 0;
+        uint64_t exact_guest_target = 0;
+        size_t module_index = 0;
+        std::array<uint8_t,32> package_identity{};
+    };
     std::unordered_map<uint64_t,FrozenGate> gates_;
     std::unordered_set<uint64_t> callback_roots_;
     bool initializing_ = false, initializer_failed_ = false;

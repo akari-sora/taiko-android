@@ -3452,10 +3452,182 @@ def native_five_peer_word_closure(start, by_pc, kinds, api):
 
 
 
-def plan_regions(instructions, kinds, entry_offsets, api, *, monitor_retiring_calls=frozenset(), native_wait_transfers=None):
+def native_returning_retire_function(start, by_pc, kinds, entry_offsets, returning_retire_calls, check_single_entry, api):
+    import hashlib
+    import android_guest_contract as contract
+
+    try:
+        contract.pack_returning_retire_table(returning_retire_calls)
+    except contract.GuestContractError as error:
+        raise api.RewriteError(f'invalid returning-retire records: {error}') from error
+    if len(returning_retire_calls) != 2:
+        raise api.RewriteError('returning-retire contract requires 2 callsites')
+    r0, r1 = returning_retire_calls
+    if (
+        start.address != r0.exclusive_head
+        or r1.exclusive_head != r0.exclusive_head
+        or r1.matching_store != r0.matching_store
+        or r1.function_start != r0.function_start
+        or r1.function_end != r0.function_end
+        or r1.fde_offset != r0.fde_offset
+        or r1.cie_offset != r0.cie_offset
+        or r1.function_sha256 != r0.function_sha256
+        or r1.final_independent_roots_sha256 != r0.final_independent_roots_sha256
+        or r1.whole_function_ownership_proof_sha256 != r0.whole_function_ownership_proof_sha256
+    ):
+        raise api.RewriteError(f'0x{start.address:x}: inconsistent returning-retire function records')
+    fn_start, fn_end = r0.function_start, r0.function_end
+    func_pcs = tuple(range(fn_start, fn_end, 4))
+    func_nodes = set(func_pcs)
+    if any(pc not in by_pc for pc in func_pcs):
+        raise api.RewriteError(f'0x{fn_start:x}: returning-retire function has missing instructions')
+    if fn_start not in entry_offsets:
+        raise api.RewriteError(f'0x{fn_start:x}: returning-retire function start is not an entry root')
+    check_single_entry(func_nodes, fn_start)
+    fn_bytes = b''.join(by_pc[pc].bytes for pc in func_pcs)
+    if hashlib.sha256(fn_bytes).digest() != r0.function_sha256:
+        raise api.RewriteError(f'0x{fn_start:x}: returning-retire function SHA-256 mismatch')
+
+    call_records = {r0.source_callsite: r0, r1.source_callsite: r1}
+    for r in (r0, r1):
+        ins = by_pc.get(r.source_callsite)
+        if (
+            ins is None
+            or ins.mnemonic != 'bl'
+            or struct.unpack('<I', ins.bytes)[0] != r.original_bl_word
+            or not ins.operands
+            or ins.operands[-1].type != ARM64_OP_IMM
+            or ins.operands[-1].imm != r.original_target
+            or r.normal_return != r.source_callsite + 4
+            or r.normal_return not in func_nodes
+        ):
+            raise api.RewriteError(f'0x{r.source_callsite:x}: returning-retire callsite mismatch')
+
+    for pc in func_pcs:
+        ins = by_pc[pc]
+        if api.is_fatal_word(struct.unpack('<I', ins.bytes)[0]):
+            raise api.RewriteError(f'0x{pc:x}: fatal word in returning-retire function')
+        validate_memory_operands(ins, api)
+        if ins.mnemonic in api.EXCLUSIVE_LOADS | api.EXCLUSIVE_STORES:
+            validate_exclusive(ins, api)
+
+    live_in = {pc: False for pc in func_pcs}
+    dead_in = {pc: False for pc in func_pcs}
+    seen = set()
+    queue = [(fn_start, False)]
+    ret_pcs = set()
+    while queue:
+        pc, live = queue.pop()
+        if (pc, live) in seen:
+            continue
+        if pc not in func_nodes:
+            raise api.RewriteError(f'0x{pc:x}: returning-retire control flow escapes function')
+        seen.add((pc, live))
+        if live:
+            live_in[pc] = True
+        else:
+            dead_in[pc] = True
+        ins = by_pc[pc]
+        if live:
+            if kinds.get(pc) is not None or api.has18(ins):
+                raise api.RewriteError(f'0x{pc:x}: host rewrite or x18 access while monitor is LIVE')
+            if re.search(r'\bw?sp\b', ins.op_str) or any(
+                operand.type == ARM64_OP_MEM and ins.reg_name(operand.mem.base) == 'sp'
+                for operand in ins.operands
+            ):
+                raise api.RewriteError(f'0x{pc:x}: SP access while monitor is LIVE')
+            if ins.mnemonic in {
+                'brk', 'hlt', 'hvc', 'smc', 'eret', 'drps', 'sys', 'sysl',
+                'dc', 'ic', 'tlbi', 'at', 'wfe', 'wfi', 'svc', 'blr', 'br', 'ret'
+            }:
+                raise api.RewriteError(f'0x{pc:x}: forbidden {ins.mnemonic} while monitor is LIVE')
+        if pc == r0.exclusive_head:
+            if ins.mnemonic not in api.EXCLUSIVE_LOADS:
+                raise api.RewriteError(f'0x{pc:x}: exclusive_head is not an exclusive load')
+            queue.append((pc + 4, True))
+            continue
+        if pc == r0.matching_store:
+            if ins.mnemonic not in api.EXCLUSIVE_STORES or not live:
+                raise api.RewriteError(f'0x{pc:x}: matching_store reached without LIVE monitor')
+            queue.append((pc + 4, False))
+            continue
+        if ins.mnemonic in api.EXCLUSIVE_LOADS | api.EXCLUSIVE_STORES | {'clrex'}:
+            raise api.RewriteError(f'0x{pc:x}: uncontracted exclusive/clrex in returning-retire function')
+        if pc in call_records:
+            queue.append((call_records[pc].normal_return, False))
+            continue
+        if ins.mnemonic == 'bl':
+            if live:
+                raise api.RewriteError(f'0x{pc:x}: unproved BL while monitor is LIVE')
+            queue.append((pc + 4, False))
+            continue
+        if ins.mnemonic == 'ret':
+            if live:
+                raise api.RewriteError(f'0x{pc:x}: RET while monitor is LIVE')
+            ret_pcs.add(pc)
+            continue
+        if any(ins.group(group) for group in (CS_GRP_CALL, CS_GRP_JUMP, CS_GRP_RET)) and (
+            ins.mnemonic != 'b' and ins.mnemonic not in CONDITIONAL and not ins.mnemonic.startswith('b.')
+        ):
+            raise api.RewriteError(f'0x{pc:x}: indirect control transfer in returning-retire function')
+        for target in successors(ins):
+            if target not in func_nodes:
+                raise api.RewriteError(f'0x{pc:x}: branch target 0x{target:x} leaves returning-retire function')
+            queue.append((target, live))
+
+    if not live_in[r0.matching_store] or dead_in[r0.matching_store]:
+        raise api.RewriteError(f'0x{r0.matching_store:x}: matching_store must be exclusively LIVE')
+    for call_pc in call_records:
+        if not live_in[call_pc]:
+            raise api.RewriteError(f'0x{call_pc:x}: returning-retire callsite never reached in LIVE')
+    if len(ret_pcs) != 1:
+        raise api.RewriteError(f'0x{fn_start:x}: returning-retire function must have a unique RET epilogue')
+    ret_pc = next(iter(ret_pcs))
+    restore_window = tuple(range(ret_pc - 20, ret_pc, 4))
+    if any(
+        p not in func_nodes
+        or by_pc[p].mnemonic not in {'ldp', 'ldr'}
+        or live_in[p]
+        or not dead_in[p]
+        for p in restore_window
+    ) or live_in[ret_pc] or not dead_in[ret_pc]:
+        raise api.RewriteError(f'0x{ret_pc:x}: returning-retire epilogue restores not exclusively DEAD')
+
+    live_nodes = {pc for pc in func_pcs if live_in[pc]}
+    visiting = set()
+    visited_live = set()
+
+    def dfs_live(node):
+        visiting.add(node)
+        if node not in {r0.matching_store, *call_records}:
+            for nxt in successors(by_pc[node]):
+                if nxt in live_nodes and nxt != r0.exclusive_head:
+                    if nxt in visiting:
+                        raise api.RewriteError(f'0x{nxt:x}: cycle while monitor is LIVE')
+                    if nxt not in visited_live:
+                        dfs_live(nxt)
+        visiting.remove(node)
+        visited_live.add(node)
+
+    for node in sorted(live_nodes):
+        if node not in visited_live:
+            dfs_live(node)
+
+    return func_nodes
+
+
+def plan_regions(instructions, kinds, entry_offsets, api, *, monitor_retiring_calls=frozenset(), native_wait_transfers=None, returning_retire_calls=()):
     if (not isinstance(monitor_retiring_calls,frozenset) or
             any(type(pc) is not int or pc<0 or pc%4 for pc in monitor_retiring_calls)):
         raise api.RewriteError('monitor-retiring call proof must be immutable aligned offsets')
+    if returning_retire_calls:
+        import android_guest_contract as contract
+        try:
+            contract.pack_returning_retire_table(returning_retire_calls)
+        except contract.GuestContractError as error:
+            raise api.RewriteError(f'invalid returning-retire records: {error}') from error
+        if len(returning_retire_calls) != 2:
+            raise api.RewriteError('returning-retire contract requires 2 callsites')
     by_pc = {ins.address: ins for ins in instructions}
     direct_incoming, entry_index_attempted = None, False
 
@@ -3512,8 +3684,19 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, monitor_retiring_ca
         check_direct_entry(nodes, nodes - {entry})
 
     regions, occupied, consumed = [], set(), set()
+    matched_returning_retire = False
     for start in instructions:
         if start.mnemonic not in api.EXCLUSIVE_LOADS or start.address in consumed:
+            continue
+        if returning_retire_calls and start.address == returning_retire_calls[0].exclusive_head:
+            func_nodes = native_returning_retire_function(
+                start, by_pc, kinds, entry_offsets, returning_retire_calls, check_single_entry, api
+            )
+            if occupied & func_nodes:
+                raise api.RewriteError(f'0x{start.address:x}: overlapping exclusive windows')
+            occupied.update(func_nodes)
+            consumed.add(start.address)
+            matched_returning_retire = True
             continue
         closure = (native_five_peer_byte_closure(start, by_pc, kinds, api) or
                    native_five_peer_halfword_closure(start, by_pc, kinds, api) or
@@ -3764,6 +3947,8 @@ def plan_regions(instructions, kinds, entry_offsets, api, *, monitor_retiring_ca
                               frozenset(terminals), frozenset(retries),
                               frozenset(exits),
                               *available[:2]))
+    if returning_retire_calls and not matched_returning_retire:
+        raise api.RewriteError('returning-retire exclusive head was not matched in plan_regions')
     return tuple(regions)
 
 

@@ -7,7 +7,7 @@ Bounded exclusive windows are relocated as complete single-entry regions.
 """
 import argparse
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from itertools import combinations
 import hashlib
 import json
@@ -21,7 +21,7 @@ import android_diag_abort
 import android_observation
 from android_guest_contract import (DM_GUEST_EXACT_GUEST, ExactGuestRecordV1,
                                     ReturningRetireRecordV1, pack_exact_guest_table,
-                                    pack_returning_retire_table, table_digest)
+                                    GuestContractError, pack_returning_retire_table, select_taiko_guest_contract, table_digest)
 from android_instruction import Instruction
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, CS_GRP_CALL, CS_GRP_JUMP, CS_GRP_RET
@@ -139,6 +139,7 @@ class Image:
     native_transfer_proofs: tuple = ()
     exact_guest_records: tuple = ()
     returning_retire_records: tuple = ()
+    guest_contract: object = None
 
     def metadata(self):
         result = {'target': self.target, 'abi': self.abi, 'size': len(self.bytes),
@@ -3512,20 +3513,23 @@ class Emitter:
                 raise RewriteError('virtual table RO failure branch exceeds reach')
             self.data[at:at+4]=word(encoding|((delta//4)&0x7FFFF)<<5)
 
-    def gate(self, ins, observation=None, *, indirect=False, stack_check=False):
+    def gate(self, ins, observation=None, *, indirect=False, stack_check=False, exact_guest=False):
         if ins.mnemonic=='svc' and ins.operands[0].imm in SVC_MONITOR_RETIRE:
             self.emit(0xD5033F5F)  # CLREX before any host stack or helper access.
         self.emit(0xD10043FF)  # sub sp,sp,#16
         self.emit(pair(False, 29, 30, 0))
         self.helper(30, DISPATCH_HELPER)
         self.emit(0xD63F03C0)
-        kind = STACK_CHECK if stack_check else INDIRECT_HOST if indirect else OBS if observation is not None else SVC if ins.mnemonic == 'svc' else TIMER
-        argument = struct.unpack('<I', ins.bytes)[0] if stack_check else indirect_register(ins) if indirect else observation.id if observation is not None else ins.operands[0].imm if kind == SVC else struct.unpack('<I', ins.bytes)[0] & 31
+        kind = STACK_CHECK if stack_check else EXACT_GUEST if exact_guest else INDIRECT_HOST if indirect else OBS if observation is not None else SVC if ins.mnemonic == 'svc' else TIMER
+        argument = struct.unpack('<I', ins.bytes)[0] if stack_check else indirect_register(ins) if (indirect or exact_guest) else observation.id if observation is not None else ins.operands[0].imm if kind == SVC else struct.unpack('<I', ins.bytes)[0] & 31
+        return_offset = self.pc
         self.gates.append(Gate(self.pc, kind, argument))
         self.gate_provenance.append(GateProvenance(self.pc, ins.address, struct.unpack('<I', ins.bytes)[0]))
         self.emit(pair(True, 29, 30, 0))
         self.emit(0x910043FF)
-        if indirect:
+        if indirect or exact_guest:
+            if exact_guest and (ins.mnemonic != 'br' or argument != 17):
+                raise RewriteError('exact guest gate requires BR x17')
             if ins.mnemonic == 'blr':
                 target = ins.address + 4
                 pages = (target >> 12) - (self.pc >> 12)
@@ -3534,7 +3538,7 @@ class Emitter:
                 self.emit(0x9000001E | (pages & 3) << 29 | (pages >> 2 & 0x7FFFF) << 5)
                 self.emit(0x910003DE | (target & 4095) << 10)
             self.emit(0xD61F0000 | argument << 5)
-            return
+            return return_offset
         if stack_check:
             if argument in (0xA9BF4FF2,0xA8C14FF2):
                 self.x18(ins)
@@ -3680,7 +3684,7 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
             indirect_policy='strict', package_version=1, guarded_indirect_offsets=(), checked_stack=False,
             readonly_ranges=(), proven_guest_indirect_offsets=(), checked_call_targets=None, protected_ranges=(),
             checked_call_forest_offsets=(), checked_call_forest_targets=(), independent_entry_offsets=None,
-            native_transfer_candidates=None, diag_abort_source=None):
+            native_transfer_candidates=None, diag_abort_source=None, guest_contract_source=None):
     """Rewrite selected ARM64 code while preserving all other raw image bytes.
 
     Ranges are image-relative, half-open (start, end) pairs within text_size.
@@ -3941,9 +3945,28 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
     for pc,plan in transfer_proofs.items():
         if native_transfer_plan(by_pc[pc],by_pc,final_transfer_entries,raw,kinds,protected_ranges) != plan:
             raise RewriteError(f'0x{pc:x}: native transfer source invalidated by final transfer entries')
+    guest_contract = None
+    exact_guest_by_br = {}
+    if guest_contract_source is not None:
+        if package_version != 3 or not checked_stack or indirect_policy != 'guarded-host':
+            raise RewriteError('guest contract source requires checked-stack package version 3 guarded-host policy')
+        try:
+            guest_contract = select_taiko_guest_contract(
+                guest_contract_source, raw, by_pc,
+                independent_roots=sorted(independent_roots),
+                final_roots=sorted(roots),
+                patch_offset=patch_offset,
+            )
+        except GuestContractError as error:
+            raise RewriteError(str(error)) from error
+        for rec in guest_contract.exact_guest_records:
+            if rec.original_br_offset not in guarded or kinds.get(rec.original_br_offset) != 'gate':
+                raise RewriteError(f'0x{rec.original_br_offset:x}: exact guest site is not a guarded indirect gate')
+            exact_guest_by_br[rec.original_br_offset] = rec
     regions = android_exclusive.plan_regions(instructions, kinds, roots, sys.modules[__name__],
                                             monitor_retiring_calls=frozenset(pc for pc,_ in diag_proof.calls),
-                                             native_wait_transfers=native_wait_transfers)
+                                             native_wait_transfers=native_wait_transfers,
+                                             returning_retire_calls=guest_contract.returning_retire_records if guest_contract is not None else ())
     required_regions=[region for region in regions if region.requires_diag_abort_v1]
     used_abort_calls=frozenset(pc for region in required_regions for pc in region.monitor_retiring_call_sites)
     verified_abort_calls=dict(diag_proof.calls)
@@ -3964,6 +3987,18 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
     if any(region_words & set(range(p.get('proof_start_offset',p.get('zero_extend_offset')),p['offset']+4,4)) for p in table_loads.values()):
         raise RewriteError('runtime guest table overlaps exclusive region')
     emitter = Emitter(raw + b'\0' * (patch_offset - len(raw)))
+    final_exact_records = []
+    if guest_contract is not None:
+        for rec in guest_contract.returning_retire_records:
+            if emitter.pc != rec.reserved_stub_offset or rec.stub_extent != 8:
+                raise RewriteError(f'0x{rec.source_callsite:x}: returning-retire stub offset/extent mismatch')
+            emitter.emit(0xD5033F5F)
+            emitter.emit(branch(emitter.pc, rec.original_target))
+            retire_bl = branch(rec.source_callsite, rec.reserved_stub_offset) | 0x80000000
+            emitter.data[rec.source_callsite:rec.source_callsite + 4] = word(retire_bl)
+            call_ins = by_pc[rec.source_callsite]
+            emitter.sites.append(Site(rec.source_callsite, rec.reserved_stub_offset, f'{call_ins.mnemonic} {call_ins.op_str}'))
+        emitter.pool_start = emitter.pc
     forest = emitter.checked_call_forest(forest_targets, forest_sites) if forest_sites else None
     for ins in instructions:
         kind = kinds[ins.address]
@@ -3990,6 +4025,9 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
             emitter.readonly_table_load(ins,table_loads[ins.address])
         elif ins.address in byte_jumps:
             emitter.byte_jump(ins, byte_jumps[ins.address])
+        elif ins.address in exact_guest_by_br:
+            ret_off = emitter.gate(ins, exact_guest=True)
+            final_exact_records.append(replace(exact_guest_by_br[ins.address], gate_return_offset=ret_off).validate())
         elif ins.address in guarded:
             emitter.gate(ins, indirect=True)
         elif ins.address in observations:
@@ -4016,7 +4054,10 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
                  diag_abort_plt_branches=tuple(sorted(diag_proof.plt_branches)) if requires_diag_abort_v1 else (),
                  checked_calls=tuple(sorted(checked_calls.items())),
                  checked_call_forests=(forest,) if forest is not None else (),
-                 native_transfer_proofs=tuple(transfer_proofs.values())).validate()
+                 native_transfer_proofs=tuple(transfer_proofs.values()),
+                 exact_guest_records=tuple(final_exact_records),
+                 returning_retire_records=guest_contract.returning_retire_records if guest_contract is not None else (),
+                 guest_contract=guest_contract).validate()
 
 
 def main():

@@ -361,6 +361,11 @@ void HleRuntime::dispatch(DmGuestThreadState* state, DmGuestRegisterFrame* frame
         if(!runtime.guarded_host_transfer(*state,*frame,gate)) {
             std::fputs("Android guarded host transfer lacks exact live authority\n",stderr);std::abort();
         }
+    } else if(gate->kind==DM_GUEST_EXACT_GUEST) {
+        auto& runtime=*static_cast<HleRuntime*>(state->user_data);
+        if(!runtime.guarded_guest_transfer(*state,*frame,gate)) {
+            std::fputs("Android exact guest transfer lacks exact live authority\n",stderr);std::abort();
+        }
     } else if (gate->kind == DM_GUEST_SVC) {
         if(gate->argument==0x36) {
             auto* runtime=static_cast<HleRuntime*>(state->user_data);
@@ -475,6 +480,20 @@ bool HleRuntime::guarded_host_transfer(const DmGuestThreadState& state,
     }
     return target && !(target&3) && (registry_.contains_callable(target) ||
                                   graphics_host_target(target,state.runtime_generation));
+}
+bool HleRuntime::guarded_guest_transfer(const DmGuestThreadState& state,
+                                        const DmGuestRegisterFrame& frame,const DmGuestGate* gate) const {
+    std::lock_guard<std::mutex> lock(runtime_lifecycle);
+    if(!loaded_ || closing_ || current_runtime.load()!=this || invoking_runtime!=this ||
+       !active_invocations_ || dm_android_peek_guest_state()!=&state || state.user_data!=this ||
+       state.runtime_generation!=process_.load_generation() ||
+       state.gate_context!=&process_ || state.gate_resolver!=Process::gate_resolver ||
+       !dm_android_stack_dispatch_context(&state) || !gate ||
+       gate->kind!=DM_GUEST_EXACT_GUEST || gate->argument!=17) return false;
+    const uintptr_t target=frame.x[17];
+    if(!target || (target&3) || registry_.contains_callable(target) ||
+       graphics_host_target(target,state.runtime_generation)) return false;
+    return process_.exact_guest_site(frame.return_pc,gate,target,state.runtime_generation);
 }
 bool HleRuntime::graphics_guest_callback(uint64_t target,uint64_t command,uint64_t requested,uint64_t data) {
     uintptr_t sp=0;

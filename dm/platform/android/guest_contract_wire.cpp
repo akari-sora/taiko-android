@@ -70,9 +70,10 @@ bool decode_exact(const uint8_t* p, ExactGuestRecordV1* out) {
        !nonzero_digest(r.symbol_name_sha256) || !nonzero_digest(r.function_sha256) ||
        !nonzero_digest(r.final_independent_roots_sha256)) return false;
     if(r.eh_identity_kind==0) {
-        if(!r.symbol_size || r.function_start!=r.symbol_value ||
-           r.symbol_size>std::numeric_limits<uint64_t>::max()-r.symbol_value ||
-           r.function_end!=r.symbol_value+r.symbol_size || r.fde_offset || r.cie_offset ||
+        if(r.function_start!=r.symbol_value ||
+           (r.symbol_size && (r.symbol_size>std::numeric_limits<uint64_t>::max()-r.symbol_value ||
+                              r.function_end!=r.symbol_value+r.symbol_size)) ||
+           r.fde_offset || r.cie_offset ||
            !digest_zero(r.eh_identity_sha256)) return false;
     } else if(r.eh_identity_kind==1) {
         if(!r.fde_offset || !r.cie_offset || !nonzero_digest(r.eh_identity_sha256)) return false;

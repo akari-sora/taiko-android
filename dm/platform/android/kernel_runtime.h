@@ -61,6 +61,8 @@ public:
     // Pure guard; callers still transfer through the restored assembly frame.
     bool guarded_host_transfer(const DmGuestThreadState&, const DmGuestRegisterFrame&,
                                const DmGuestGate*) const;
+    bool guarded_guest_transfer(const DmGuestThreadState&, const DmGuestRegisterFrame&,
+                                const DmGuestGate*) const;
     // Executes on the current retained guest invocation's stack. No nested
     // GuestStack::call and no lifecycle mutex spans the actual callback.
     bool graphics_guest_callback(uint64_t target, uint64_t command, uint64_t requested, uint64_t data);

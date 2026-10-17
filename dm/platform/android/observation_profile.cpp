@@ -100,7 +100,7 @@ bool validate_observation_profile(ModulePackage& p,const char** error) {
             return reject(error,"legacy image cannot carry extended authority");
         return true;
     }
-    if(p.wire_version!=2 || p.gate_provenance.size()!=p.gates.size())
+    if((p.wire_version!=2 && p.wire_version!=3) || p.gate_provenance.size()!=p.gates.size())
         return reject(error,"extended gate provenance is missing");
     if(!p.profile_class) {
         if(p.profile_digest!=zeros || have_obs || !p.parameters.empty())
@@ -175,8 +175,17 @@ bool validate_observation_profile(ModulePackage& p,const char** error) {
                word(p,t+12)!=0xd63f03c0u || word(p,t+16)!=pair(true,29,30,0) ||
                word(p,t+20)!=0x910043ffu || !stack_tail(p,t,v))
                 return reject(error,"checked-stack preflight differs from canonical instruction/stub");
+        } else if(g.kind==DM_GUEST_EXACT_GUEST) {
+            const uint64_t t=s->trampoline_offset;
+            if(p.wire_version!=3 || !p.checked_stack || g.argument!=17 || v.original_word!=0xd61f0220u ||
+               !bounds(p,t,28) || g.return_offset!=t+16 || word(p,t)!=0xd10043ffu ||
+               word(p,t+4)!=pair(false,29,30,0) || !helper_at(p,t+8,30,DM_GUEST_DISPATCH_HELPER) ||
+               word(p,t+12)!=0xd63f03c0u || word(p,t+16)!=pair(true,29,30,0) ||
+               word(p,t+20)!=0x910043ffu || word(p,t+24)!=0xd61f0220u)
+                return reject(error,"exact guest gate differs from canonical PLT/trampoline shape");
         } else return reject(error,"unknown extended gate kind");
-        if(g.kind!=DM_GUEST_OBSERVATION && g.kind!=DM_GUEST_INDIRECT_HOST && g.kind!=DM_GUEST_STACK_CHECK) {
+        if(g.kind!=DM_GUEST_OBSERVATION && g.kind!=DM_GUEST_INDIRECT_HOST &&
+           g.kind!=DM_GUEST_STACK_CHECK && g.kind!=DM_GUEST_EXACT_GUEST) {
             const uint64_t t=s->trampoline_offset;
             if(!bounds(p,t,28) || g.return_offset!=t+16 || word(p,t)!=0xd10043ffu ||
                word(p,t+4)!=pair(false,29,30,0) || !helper_at(p,t+8,30,DM_GUEST_DISPATCH_HELPER) ||
