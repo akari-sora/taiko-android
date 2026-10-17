@@ -22,7 +22,7 @@ static_assert(offsetof(DmGuestRegisterFrame, return_pc) == 792);
 static_assert(sizeof(DmGuestRegisterFrame) == 800);
 
 enum DmGuestHelper : uint32_t { DM_GUEST_STATE_HELPER = 1, DM_GUEST_DISPATCH_HELPER = 2 };
-enum DmGuestGateKind : uint32_t { DM_GUEST_SVC = 1, DM_GUEST_TIMER = 2, DM_GUEST_OBSERVATION = 3, DM_GUEST_INDIRECT_HOST = 4, DM_GUEST_STACK_CHECK = 5 };
+enum DmGuestGateKind : uint32_t { DM_GUEST_SVC = 1, DM_GUEST_TIMER = 2, DM_GUEST_OBSERVATION = 3, DM_GUEST_INDIRECT_HOST = 4, DM_GUEST_STACK_CHECK = 5, DM_GUEST_EXACT_GUEST = 6 };
 struct DmGuestFixup { size_t offset; uint32_t helper; };
 struct DmGuestGate { size_t return_offset; uint32_t kind; uint32_t argument; };
 enum DmGuestSegmentFlags : uint32_t { DM_GUEST_READ = 1, DM_GUEST_WRITE = 2, DM_GUEST_EXEC = 4 };

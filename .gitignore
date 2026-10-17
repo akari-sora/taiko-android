@@ -42,3 +42,17 @@ dm/platform/android/original_draw_shaders/
 dm/platform/android/original_sampled_shaders/
 dm/platform/android/graphics_fixtures/generated_graphics.h
 dm/platform/android/graphics_fixtures/shaders/
+
+# Hardened ignore rules: never commit keys, game containers, local toolsets, or build outputs
+title.keys
+*.keys
+*.xci
+*.nsp
+*.nsz
+*.nca
+games/
+dd-extract/
+.local/
+new.local/
+**/.build/
+dm/verify/android/evidence/

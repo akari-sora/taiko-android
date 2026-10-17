@@ -221,6 +221,8 @@ def publication_contract_obligation(nso,metadata):
 
     by_pc=OriginalWords()
     proof=selected_diag_abort_proof(nso,metadata,by_pc)
+    if proof.coverage_error:
+        raise ValueError(proof.coverage_error)
     calls=dict(proof.calls)
     if not calls:return DiagAbortProof(),frozenset()
 

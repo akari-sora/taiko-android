@@ -16,6 +16,10 @@ import struct
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, CS_GRP_JUMP, CS_GRP_CALL, CS_GRP_RET
 from capstone.arm64_const import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG, ARM64_REG_X0
 from android_diag_abort import MODULE_REQUIRE_DIAG_ABORT_V1
+from android_guest_contract import (HEADER_SIZE_V3, MAGIC_V3,
+    DM_MODULE_REQUIRE_EXACT_GUEST_V1, DM_MODULE_REQUIRE_RETURNING_RETIRE_V1,
+    EXACT_GUEST_STRIDE_V1, RETURNING_RETIRE_STRIDE_V1,
+    pack_exact_guest_table, pack_returning_retire_table, table_digest)
 from android_rewrite import (ABI, INDIRECT_HOST, FatalWord, RewriteError, rewrite, site_kind,
                              indirect_register, is_fatal_word, is_fatal_instruction, stack_check_operation, has18,
                              byte_jump_table,halfword_jump_table,readonly_guest_table,x18_jump_table,native_transfer_plan)
@@ -27,6 +31,7 @@ from taiko_call_contract import select_checked_calls, select_checked_call_forest
 
 MAGIC = b'DMAMOD01'
 HEADER_SIZE = 320
+SUPPORTED_PACKAGE_VERSIONS = (1, 2, 3)
 MD = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
 MD.detail = True
 MODULE_NAME = re.compile(r'[A-Za-z0-9_-]{1,15}\Z')
@@ -868,22 +873,33 @@ again by the independent rewrite stage.
 def make_package(name, nso, metadata, image, patch_offset, package_version=1):
     if not MODULE_NAME.fullmatch(name):
         raise ImportError('module name must be 1..15 ASCII letters/digits/_/-')
-    if package_version not in (1, 2) or (package_version == 1 and (image.profile is not None or any(g.kind == INDIRECT_HOST for g in image.gates))):
-        raise ImportError('registered profiles and guarded transfers require explicit package version 2')
-    header_size = HEADER_SIZE if package_version == 1 else 384
+    if package_version not in SUPPORTED_PACKAGE_VERSIONS or (package_version == 1 and (image.profile is not None or any(g.kind == INDIRECT_HOST for g in image.gates))):
+        raise ImportError('registered profiles and guarded transfers require explicit package version 2 or 3')
+    header_size = HEADER_SIZE if package_version == 1 else 384 if package_version == 2 else HEADER_SIZE_V3
     header = bytearray(header_size)
-    header[:8] = MAGIC if package_version == 1 else b'DMAMOD02'
-    if image.requires_diag_abort_v1 or image.diag_abort_call_sites or image.diag_abort_plt_branches:
+    header[:8] = MAGIC if package_version == 1 else b'DMAMOD02' if package_version == 2 else MAGIC_V3
+    if package_version == 3 or image.requires_diag_abort_v1 or image.diag_abort_call_sites or image.diag_abort_plt_branches:
         image.validate()
     if image.requires_diag_abort_v1:
-        if package_version!=2:
+        if package_version not in (2, 3):
             raise ImportError('required DiagAbort ABI cannot be encoded in a legacy capsule')
-    required_flags=(1 if image.checked_stack else 0)|(MODULE_REQUIRE_DIAG_ABORT_V1 if image.requires_diag_abort_v1 else 0)
+    if package_version != 3 and (image.exact_guest_records or image.returning_retire_records):
+        raise ImportError('typed guest contracts require package version 3')
+    exact_records = image.exact_guest_records if package_version == 3 else ()
+    retire_records = image.returning_retire_records if package_version == 3 else ()
+    if (exact_records or retire_records) and not image.checked_stack:
+        raise ImportError('typed guest contracts require checked-stack package version 3')
+    exact = pack_exact_guest_table(exact_records)
+    retire = pack_returning_retire_table(retire_records)
+    required_flags=((1 if image.checked_stack else 0)|
+                    (MODULE_REQUIRE_DIAG_ABORT_V1 if image.requires_diag_abort_v1 else 0)|
+                    (DM_MODULE_REQUIRE_EXACT_GUEST_V1 if exact else 0)|
+                    (DM_MODULE_REQUIRE_RETURNING_RETIRE_V1 if retire else 0))
     struct.pack_into('<IIII', header, 8, package_version, ABI, header_size, required_flags)
     section_values = tuple(value for section in nso.sections for value in (section.offset, section.size))
     struct.pack_into('<11Q', header, 24, len(image.bytes), len(nso.image), *section_values,
                      nso.bss_size, patch_offset, len(image.bytes) - patch_offset)
-    if package_version == 2 and len(image.gates) != len(image.gate_provenance):
+    if package_version in (2, 3) and len(image.gates) != len(image.gate_provenance):
         raise ImportError('extended gates require original instruction provenance')
     gates = (b''.join(struct.pack('<QII', item.return_offset, item.kind, item.argument) for item in image.gates)
              if package_version == 1 else b''.join(struct.pack('<QQIIII', item.return_offset, origin.original_offset,
@@ -893,9 +909,9 @@ def make_package(name, nso, metadata, image, patch_offset, package_version=1):
               b''.join(struct.pack('<QQ', item.offset, item.trampoline) for item in image.sites)]
     offsets, cursor = [], header_size
     for index, table in enumerate(tables):
-        offsets.extend((cursor, len(table) // (32 if index == 1 and package_version == 2 else 16)))
+        offsets.extend((cursor, len(table) // (32 if index == 1 and package_version in (2, 3) else 16)))
         cursor += len(table)
-    if package_version == 2:
+    if package_version in (2, 3):
         if image.profile is not None:
             header[320:352] = image.profile.digest
             struct.pack_into('<I', header, 352, image.profile.identity_class)
@@ -904,6 +920,18 @@ def make_package(name, nso, metadata, image, patch_offset, package_version=1):
                                      p.destination, p.slot, p.flags, 0) for p in image.parameters)
         tables.append(params)
         cursor += len(params)
+    if package_version == 3:
+        exact_offset = cursor
+        tables.append(exact)
+        cursor += len(exact)
+        retire_offset = cursor
+        tables.append(retire)
+        cursor += len(retire)
+        struct.pack_into('<QQIIQQII', header, 384,
+                         exact_offset, len(exact_records), EXACT_GUEST_STRIDE_V1, 1,
+                         retire_offset, len(retire_records), RETURNING_RETIRE_STRIDE_V1, 1)
+        header[432:464] = table_digest(exact)
+        header[464:496] = table_digest(retire)
     payload_offset = align(cursor, 16)
     struct.pack_into('<7Q', header, 112, payload_offset, *offsets)
     header[168:168 + len(name)] = name.encode('ascii')
@@ -947,18 +975,18 @@ def audited_callback_roots(nso, metadata, code_ranges, code_report):
 def import_module(source, name, *, package_version=1, profile=None, indirect_policy='strict', callback_audit=False, checked_stack=False):
     if indirect_policy not in ('strict', 'guarded-host'):
         raise ImportError('unsupported indirect policy')
-    if indirect_policy == 'guarded-host' and package_version != 2:
-        raise ImportError('guarded host transfers require package version 2')
+    if indirect_policy == 'guarded-host' and package_version not in (2, 3):
+        raise ImportError('guarded host transfers require package version 2 or 3')
     if not isinstance(callback_audit, bool):
         raise ImportError('callback audit selection must be explicit boolean')
     if callback_audit and package_version != 2:
         raise ImportError('callback audit receipt requires package version 2')
-    if not isinstance(checked_stack, bool) or (checked_stack and package_version != 2):
-        raise ImportError('checked-stack mode requires explicit boolean and package version 2')
+    if not isinstance(checked_stack, bool) or (checked_stack and package_version not in (2, 3)):
+        raise ImportError('checked-stack mode requires explicit boolean and package version 2 or 3')
     nso = parse_nso(source)
     metadata = parse_metadata(nso)
-    if package_version not in (1, 2) or (package_version == 1 and profile is not None):
-        raise ImportError('profile selection requires package version 2')
+    if package_version not in SUPPORTED_PACKAGE_VERSIONS or (package_version == 1 and profile is not None):
+        raise ImportError('profile selection requires package version 2 or 3')
     try:
         selected_profile = resolve_profile(name, nso.build_id, nso.source_sha256, profile) if profile is not None else None
     except ValueError as error:
@@ -974,7 +1002,7 @@ def import_module(source, name, *, package_version=1, profile=None, indirect_pol
                     code_ranges=code_ranges, patch_offset=patch_offset,
                     entry_offsets=code_report['roots'], profile=selected_profile,
                     independent_entry_offsets=code_report['independent_roots'],
-                    diag_abort_source=bytes(source) if package_version==2 and checked_stack else None,
+                    diag_abort_source=bytes(source) if package_version in (2, 3) and checked_stack else None,
                     indirect_policy=indirect_policy, package_version=package_version,
                     guarded_indirect_offsets=code_report.get('guarded_indirect_sites', ()), checked_stack=checked_stack,
                     readonly_ranges=((nso.sections[1].offset,nso.sections[1].end),),
@@ -1015,18 +1043,18 @@ def import_directory(input_directory, output_directory, modules=('main', 'sdk'),
     names = list(modules)
     if not names or len(names) != len(set(names)) or any(not MODULE_NAME.fullmatch(name) for name in names):
         raise ImportError('explicit module list is empty, duplicated, or invalid')
-    if package_version not in (1, 2) or (profiles and package_version != 2):
-        raise ImportError('profile selection requires explicit package version 2')
+    if package_version not in SUPPORTED_PACKAGE_VERSIONS or (profiles and package_version not in (2, 3)):
+        raise ImportError('profile selection requires explicit package version 2 or 3')
     if indirect_policy not in ('strict', 'guarded-host'):
         raise ImportError('unsupported indirect policy')
-    if indirect_policy == 'guarded-host' and package_version != 2:
-        raise ImportError('guarded host transfers require package version 2')
+    if indirect_policy == 'guarded-host' and package_version not in (2, 3):
+        raise ImportError('guarded host transfers require package version 2 or 3')
     if not isinstance(callback_audit, bool):
         raise ImportError('callback audit selection must be explicit boolean')
     if callback_audit and package_version != 2:
         raise ImportError('callback audit receipt requires package version 2')
-    if not isinstance(checked_stack, bool) or (checked_stack and package_version != 2):
-        raise ImportError('checked-stack mode requires explicit boolean and package version 2')
+    if not isinstance(checked_stack, bool) or (checked_stack and package_version not in (2, 3)):
+        raise ImportError('checked-stack mode requires explicit boolean and package version 2 or 3')
     if profiles is not None and (not isinstance(profiles, dict) or
             any(name not in names or not isinstance(variant, str) or not variant
                 for name, variant in profiles.items())):
@@ -1037,7 +1065,7 @@ def import_directory(input_directory, output_directory, modules=('main', 'sdk'),
     if output_directory.exists() and any(output_directory.glob('*.dmag')):
         raise ImportError('output directory already contains packages; choose a fresh directory')
     output_directory.mkdir(parents=True, exist_ok=True)
-    report = {'format': 'DMAMOD01' if package_version == 1 else 'DMAMOD02', 'abi': ABI, 'module_order': names, 'status': 'rejected', 'modules': [], 'unsupported': []}
+    report = {'format': 'DMAMOD01' if package_version == 1 else 'DMAMOD02' if package_version == 2 else 'DMAMOD03', 'abi': ABI, 'module_order': names, 'status': 'rejected', 'modules': [], 'unsupported': []}
     if indirect_policy == 'guarded-host':
         report['indirect_policy'] = indirect_policy
     if checked_stack:
@@ -1090,11 +1118,11 @@ def main():
     parser.add_argument('input_directory', type=Path)
     parser.add_argument('output_directory', type=Path)
     parser.add_argument('--modules', nargs='+', default=['main', 'sdk'])
-    parser.add_argument('--package-version', type=int, choices=(1, 2), default=1)
+    parser.add_argument('--package-version', type=int, choices=SUPPORTED_PACKAGE_VERSIONS, default=1)
     parser.add_argument('--profile', action='append', default=[], metavar='MODULE=VARIANT')
     parser.add_argument('--indirect-policy', choices=('strict', 'guarded-host'), default='strict')
     parser.add_argument('--callback-audit', action='store_true', help='emit trusted callback audit receipt v1 for package v2')
-    parser.add_argument('--checked-stack', action='store_true', help='v2 immutable runtime SP preflight (required for canonical original modules)')
+    parser.add_argument('--checked-stack', action='store_true', help='extended-wire immutable runtime SP preflight (required for canonical original modules)')
     args = parser.parse_args()
     try:
         profiles = {}

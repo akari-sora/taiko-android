@@ -44,6 +44,7 @@ add_library(d2r_diagnostics SHARED diagnostics.cpp
   ../../platform/android/touch_controls_platform.cpp
   ../../platform/android/input_activity.cpp
   ../../platform/android/module_runtime.cpp
+  ../../platform/android/guest_contract_wire.cpp
   ../../platform/android/module_sha256.cpp
   ../../platform/android/module_probes.cpp
   ../../platform/android/guest_thread.cpp

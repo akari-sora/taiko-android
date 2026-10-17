@@ -1,0 +1,20 @@
+/mnt/c/Users/aa223/Documents/Codex/2026-10-16/taiko-android/native-runs/dmamod03-runtime-ed3720c7f5f949c1add453b99713b3a3/src/module_runtime.cpp: In member function ‘bool dm_android::Process::mapped_range(uint64_t, size_t, unsigned int) const’:
+/mnt/c/Users/aa223/Documents/Codex/2026-10-16/taiko-android/native-runs/dmamod03-runtime-ed3720c7f5f949c1add453b99713b3a3/src/module_runtime.cpp:1072:9: warning: this ‘if’ clause does not guard... [-Wmisleading-indentation]
+ 1072 |         if(address<base)continue;const uint64_t off=address-base;
+      |         ^~
+/mnt/c/Users/aa223/Documents/Codex/2026-10-16/taiko-android/native-runs/dmamod03-runtime-ed3720c7f5f949c1add453b99713b3a3/src/module_runtime.cpp:1072:34: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+ 1072 |         if(address<base)continue;const uint64_t off=address-base;
+      |                                  ^~~~~
+/mnt/c/Users/aa223/Documents/Codex/2026-10-16/taiko-android/native-runs/dmamod03-runtime-ed3720c7f5f949c1add453b99713b3a3/src/module_runtime.cpp: In member function ‘bool dm_android::Process::static_main_import_caller(uint64_t, uintptr_t, const char*, uint64_t*) const’:
+/mnt/c/Users/aa223/Documents/Codex/2026-10-16/taiko-android/native-runs/dmamod03-runtime-ed3720c7f5f949c1add453b99713b3a3/src/module_runtime.cpp:1157:9: warning: this ‘if’ clause does not guard... [-Wmisleading-indentation]
+ 1157 |         if(plt_signed<0)return false;const uint64_t plt=uint64_t(plt_signed);
+      |         ^~
+/mnt/c/Users/aa223/Documents/Codex/2026-10-16/taiko-android/native-runs/dmamod03-runtime-ed3720c7f5f949c1add453b99713b3a3/src/module_runtime.cpp:1157:38: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+ 1157 |         if(plt_signed<0)return false;const uint64_t plt=uint64_t(plt_signed);
+      |                                      ^~~~~
+/mnt/c/Users/aa223/Documents/Codex/2026-10-16/taiko-android/native-runs/dmamod03-runtime-ed3720c7f5f949c1add453b99713b3a3/src/module_runtime.cpp:1167:9: warning: this ‘if’ clause does not guard... [-Wmisleading-indentation]
+ 1167 |         if(got_signed<0)return false;const uint64_t got=uint64_t(got_signed);
+      |         ^~
+/mnt/c/Users/aa223/Documents/Codex/2026-10-16/taiko-android/native-runs/dmamod03-runtime-ed3720c7f5f949c1add453b99713b3a3/src/module_runtime.cpp:1167:38: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+ 1167 |         if(got_signed<0)return false;const uint64_t got=uint64_t(got_signed);
+      |                                      ^~~~~

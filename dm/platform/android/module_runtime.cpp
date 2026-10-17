@@ -2,6 +2,7 @@
 #include "module_sha256.h"
 #include "guest_loader_internal.h"
 #include "guest_stack_check.h"
+#include "guest_contract_wire.h"
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -43,6 +44,27 @@ std::array<uint8_t,32> package_identity(const ModulePackage& p) {
     scalar(p.gates.size());for(const auto& x:p.gates){scalar(x.return_offset);scalar(x.kind);scalar(x.argument);}
     scalar(p.gate_provenance.size());for(const auto& x:p.gate_provenance){scalar(x.return_offset);scalar(x.original_offset);scalar(x.kind);scalar(x.argument);scalar(x.original_word);scalar(x.flags);}
     scalar(p.parameters.size());for(const auto& x:p.parameters){scalar(x.a);scalar(x.b);scalar(x.word_a);scalar(x.word_b);scalar(x.destination);scalar(x.slot);scalar(x.flags);}
+    scalar(p.exact_guest_records.size());for(const auto& x:p.exact_guest_records){
+        scalar(x.schema);scalar(x.flags);scalar(x.gate_return_offset);scalar(x.original_br_offset);
+        scalar(x.original_br_word);scalar(x.target_register);scalar(x.got_offset);scalar(x.relocation_index);
+        scalar(x.relocation_type);scalar(x.symbol_index);scalar(x.symbol_type);scalar(x.symbol_binding);
+        scalar(x.symbol_visibility);scalar(static_cast<uint64_t>(x.relocation_addend));
+        scalar(x.symbol_name_offset);scalar(x.symbol_name_length);scalar(x.symbol_section_index);
+        scalar(x.eh_identity_kind);scalar(x.symbol_value);scalar(x.symbol_size);
+        scalar(x.same_module_target_offset);scalar(x.function_start);scalar(x.function_end);
+        scalar(x.fde_offset);scalar(x.cie_offset);scalar(x.independent_root_offset);
+        raw(x.symbol_name_sha256.data(),32);raw(x.function_sha256.data(),32);
+        raw(x.eh_identity_sha256.data(),32);raw(x.final_independent_roots_sha256.data(),32);
+    }
+    scalar(p.returning_retire_records.size());for(const auto& x:p.returning_retire_records){
+        scalar(x.schema);scalar(x.flags);scalar(x.source_callsite);scalar(x.original_bl_word);
+        scalar(x.stub_extent);scalar(x.original_target);scalar(x.normal_return);scalar(x.reserved_stub_offset);
+        scalar(x.exclusive_head);scalar(x.matching_store);scalar(x.function_start);scalar(x.function_end);
+        scalar(x.fde_offset);scalar(x.cie_offset);raw(x.function_sha256.data(),32);
+        raw(x.final_independent_roots_sha256.data(),32);raw(x.whole_function_ownership_proof_sha256.data(),32);
+    }
+    raw(p.exact_guest_table_sha256.data(),32);raw(p.returning_retire_table_sha256.data(),32);
+    raw(p.final_independent_roots_sha256.data(),32);raw(p.whole_function_ownership_proof_sha256.data(),32);
     scalar(p.sites.size());for(const auto& x:p.sites){scalar(x.original_offset);scalar(x.trampoline_offset);}
     scalar(p.segments.size());for(const auto& x:p.segments){scalar(x.offset);scalar(x.size);scalar(x.flags);}
     scalar(p.image.abi);scalar(p.image.size);scalar(p.image.entry_offset);
@@ -71,6 +93,26 @@ bool overlaps(Span a, Span b) {
 bool zero(const uint8_t* p, size_t n) {
     for (size_t i = 0; i < n; ++i) if (p[i]) return false;
     return true;
+}
+bool guest_contract_digest(const uint8_t* bytes,size_t size,uint8_t digest[32],void*) {
+    if(!digest || (size && !bytes))return false;
+    module_sha256(bytes,size,digest);return true;
+}
+const char* guest_contract_error(GuestContractWireError error) {
+    switch(error) {
+    case GuestContractWireError::Ok:return "ok";
+    case GuestContractWireError::MissingInput:return "missing input";
+    case GuestContractWireError::UnsupportedHeader:return "unsupported header";
+    case GuestContractWireError::InvalidFlags:return "invalid flags";
+    case GuestContractWireError::InvalidGeometry:return "invalid geometry";
+    case GuestContractWireError::InvalidPadding:return "invalid padding";
+    case GuestContractWireError::InvalidDigest:return "invalid digest";
+    case GuestContractWireError::InvalidExactRecord:return "invalid exact-guest record";
+    case GuestContractWireError::InvalidRetireRecord:return "invalid returning-retire record";
+    case GuestContractWireError::InvalidGateAssociation:return "invalid kind-6 gate association";
+    case GuestContractWireError::InvalidAudit:return "invalid trusted guest-contract audit";
+    }
+    return "unknown guest-contract error";
 }
 bool limits_valid(const ModuleLimits& limits) {
     return limits.image_bytes && limits.image_bytes <= 256u * 1024u * 1024u &&
@@ -152,11 +194,12 @@ const DmGuestGate* diag_plt_gate(const ModulePackage& p,uint64_t plt) {
 
 ModulePackage::ModulePackage(const ModulePackage& other) { *this=other; }
 ModulePackage& ModulePackage::operator=(const ModulePackage& p) {
-    if(this==&p) return *this;
+    if(this==&p) { guest_contract_admission_.reset(); return *this; }
     // Revoke before copying, including if a later allocation throws.
     callback_admitted_=false;callback_identity_={};callback_roots_.clear();callback_indirect_policy_=CallbackIndirectPolicy::Strict;
     stack_admitted_=false;stack_identity_={};
     capsule_verified_=false;capsule_bytes_=0;capsule_sha256_={};
+    guest_contract_admission_.reset();
     name=p.name;build_id=p.build_id;source_sha256=p.source_sha256;image_sha256=p.image_sha256;
     original_size=p.original_size;symbol_count=p.symbol_count;string_bytes=p.string_bytes;
     data_offset=p.data_offset;data_bytes=p.data_bytes;bss_bytes=p.bss_bytes;
@@ -165,6 +208,11 @@ ModulePackage& ModulePackage::operator=(const ModulePackage& p) {
     required_flags=p.required_flags;
     profile_class=p.profile_class;profile_digest=p.profile_digest;profile=p.profile;
     gate_provenance=p.gate_provenance;parameters=p.parameters;sites=p.sites;segments=p.segments;
+    exact_guest_records=p.exact_guest_records;returning_retire_records=p.returning_retire_records;
+    exact_guest_table_sha256=p.exact_guest_table_sha256;
+    returning_retire_table_sha256=p.returning_retire_table_sha256;
+    final_independent_roots_sha256=p.final_independent_roots_sha256;
+    whole_function_ownership_proof_sha256=p.whole_function_ownership_proof_sha256;
     image=p.image;
     image.bytes=bytes.data();image.fixups=fixups.data();image.gates=gates.data();image.segments=segments.data();
     return *this;
@@ -180,48 +228,24 @@ void ModulePackage::refresh_view() {
 bool decode_package_with_callback_audit(const uint8_t* blob,size_t size,const uint8_t* expected_digest,
                     const TrustedCallbackAudit& audit,std::unique_ptr<ModulePackage>* out,
                     std::string* error,const ModuleLimits& limits) {
-    if(error) error->clear();
-    if(!out) return fail(error,"missing package output");
-    out->reset();
-    // Bound caller-supplied counts before decoding or allocating a root list.
-    if(!limits_valid(limits) || !blob || size<384 || size>limits.package_bytes ||
-       audit.version!=1 || audit.root_kind!=CallbackRootKind::DefinedSttFunc ||
-       (audit.indirect_policy!=CallbackIndirectPolicy::Strict &&
-        audit.indirect_policy!=CallbackIndirectPolicy::GuardedHost) ||
-       audit.root_count>limits.callback_roots || (audit.root_count && !audit.roots) ||
-       memcmp(blob,"DMAMOD02",8) || u32(blob+8)!=2 ||
-       audit.root_count>u64(blob+48)/4)
-        return fail(error,"invalid or unsupported trusted callback audit");
-    if(!expected_digest || memcmp(audit.package_sha256.data(),expected_digest,32) ||
-       memcmp(audit.source_sha256.data(),blob+216,32))
-        return fail(error,"callback audit package/source identity mismatch");
-    for(size_t i=0;i<audit.root_count;++i) {
-        const uint64_t root=audit.roots[i],text=u64(blob+40),text_size=u64(blob+48);
-        if((root&3) || root<text || !range(root-text,4,text_size) ||
-           (i && audit.roots[i-1]>=root))
-            return fail(error,"callback audit roots must be sorted unique original-text entries");
-    }
-    std::unique_ptr<ModulePackage> p;
-    if(!decode_package(blob,size,expected_digest,&p,error,limits)) return false;
-    try {
-        const bool guarded=std::any_of(p->gates.begin(),p->gates.end(),
-            [](const DmGuestGate& g){return g.kind==DM_GUEST_INDIRECT_HOST;});
-        if(guarded && audit.indirect_policy==CallbackIndirectPolicy::Strict)
-            return fail(error,"strict callback audit contains guarded-host gates");
-        // Dynamic symbols are independently validated below by the same parser
-        // used before mapping; merely being present in RX grants no authority.
-        if(!validate_callback_symbols(*p,audit,error)) return false;
-        if(audit.root_count) p->callback_roots_.assign(audit.roots,audit.roots+audit.root_count);
-        p->callback_indirect_policy_=audit.indirect_policy;
-        p->callback_identity_=package_identity(*p);p->callback_admitted_=true;
-        *out=std::move(p);return true;
-    } catch(const std::bad_alloc&) {return fail(error,"callback audit allocation failed");}
+    return decode_package_with_audits(blob,size,expected_digest,&audit,nullptr,out,error,limits);
+}
+
+bool decode_package_with_guest_contract_audit(const uint8_t* blob,size_t size,const uint8_t* expected_digest,
+                    const TrustedGuestContractAuditV1& audit,std::unique_ptr<ModulePackage>* out,
+                    std::string* error,const ModuleLimits& limits) {
+    return decode_package_with_audits(blob,size,expected_digest,nullptr,&audit,out,error,limits);
 }
 namespace {
 // Called by Process only after its private admission/identity checks, or by
 // the public wrapper for legacy packages. Checked mappings need the Process
 // entry registry before any instruction, including a leaf without gates.
 bool prepare_validated_package(ModulePackage& package,DmGuestLoadedImage* out,char* error,size_t error_size) {
+    if(package.wire_version==3) {
+        if(error && error_size) std::snprintf(error,error_size,"DMAMOD03 execution is unavailable in the host-only foundation");
+        if(out) *out={};
+        return false;
+    }
     const char* detail=nullptr;
     if(!validate_observation_profile(package,&detail)) {
         if(error && error_size) std::snprintf(error,error_size,"%s",detail?detail:"invalid canonical profile");
@@ -258,16 +282,28 @@ bool decode_package(const uint8_t* blob, size_t size, const uint8_t* expected_di
     if (memcmp(package_digest,expected_digest,32))
         return fail(error,"whole-package SHA256 mismatch");
     const uint32_t version = u32(blob + 8);
-    const size_t header = version == 1 ? 320 : 384;
-    if ((version != 1 && version != 2) || size < header ||
-        memcmp(blob, version == 1 ? "DMAMOD01" : "DMAMOD02", 8) ||
+    const size_t header = version == 1 ? 320 : version == 2 ? 384 : version == 3 ? 512 : 0;
+    const char* magic = version == 1 ? "DMAMOD01" : version == 2 ? "DMAMOD02" : "DMAMOD03";
+    const uint32_t allowed_flags = version == 1 ? 0u : version == 2 ?
+        (1u|DM_MODULE_REQUIRE_DIAG_ABORT_V1) :
+        (1u|DM_MODULE_REQUIRE_DIAG_ABORT_V1|DM_MODULE_REQUIRE_EXACT_GUEST_V1|
+            DM_MODULE_REQUIRE_RETURNING_RETIRE_V1);
+    if (!header || size < header || memcmp(blob,magic,8) ||
         u32(blob + 12) != DM_ANDROID_GUEST_ABI || u32(blob + 16) != header ||
-        (u32(blob + 20)&~(version==2?(1u|DM_MODULE_REQUIRE_DIAG_ABORT_V1):0u)) ||
+        (u32(blob + 20)&~allowed_flags) ||
         ((u32(blob+20)&DM_MODULE_REQUIRE_DIAG_ABORT_V1) && !(u32(blob+20)&1u)) ||
+        ((u32(blob+20)&(DM_MODULE_REQUIRE_EXACT_GUEST_V1|DM_MODULE_REQUIRE_RETURNING_RETIRE_V1)) &&
+         (version!=3 || !(u32(blob+20)&1u))) ||
         !zero(blob + 296, 24))
         return fail(error, "invalid module format, ABI, flags or reserved header");
-    if (version == 2 && (u32(blob+356) != 32 || u32(blob+376) != 40 || u32(blob+380)))
+    if (version >= 2 && (u32(blob+356) != 32 || u32(blob+376) != 40 || u32(blob+380)))
         return fail(error, "invalid extended metadata strides or reserved word");
+    DecodedGuestContractV1 decoded_contract{};
+    if(version==3) {
+        GuestContractWireError wire_error=GuestContractWireError::Ok;
+        if(!decode_guest_contract_v3(blob,size,guest_contract_digest,nullptr,&decoded_contract,&wire_error))
+            return fail(error,std::string("invalid DMAMOD03 guest contract: ")+guest_contract_error(wire_error));
+    }
     const uint64_t image_size = u64(blob + 24), original_size = u64(blob + 32);
     Span sections[4] = {{u64(blob+40),u64(blob+48)}, {u64(blob+56),u64(blob+64)},
                         {u64(blob+72),u64(blob+80)}, {u64(blob+96),u64(blob+104)}};
@@ -330,8 +366,9 @@ bool decode_package(const uint8_t* blob, size_t size, const uint8_t* expected_di
         auto package = std::make_unique<ModulePackage>();
         package->wire_version = version;
         package->checked_stack = (u32(blob+20)&1)!=0;
-        package->required_flags = u32(blob+20)&DM_MODULE_REQUIRE_DIAG_ABORT_V1;
-        if (version == 2) {
+        package->required_flags = u32(blob+20)&(DM_MODULE_REQUIRE_DIAG_ABORT_V1|
+            DM_MODULE_REQUIRE_EXACT_GUEST_V1|DM_MODULE_REQUIRE_RETURNING_RETIRE_V1);
+        if (version >= 2) {
             package->profile_class = u32(blob+352);
             memcpy(package->profile_digest.data(),blob+320,32);
         }
@@ -366,24 +403,26 @@ bool decode_package(const uint8_t* blob, size_t size, const uint8_t* expected_di
         }
         for (uint64_t i=0;i<counts[1];++i) {
             const uint8_t* record=blob+tables[1].offset+i*strides[1];
-            const uint64_t off=u64(record), original=version == 2 ? u64(record+8) : 0;
-            const uint32_t kind=u32(record+(version == 2 ? 16 : 8)),
-                           arg=u32(record+(version == 2 ? 20 : 12));
+            const uint64_t off=u64(record), original=version >= 2 ? u64(record+8) : 0;
+            const uint32_t kind=u32(record+(version >= 2 ? 16 : 8)),
+                           arg=u32(record+(version >= 2 ? 20 : 12));
             if ((off&3) || off<4 || !range(off,4,image_size) ||
                 !in_segment(*package,off-4,8,DM_GUEST_EXEC) ||
                 ((kind==DM_GUEST_SVC && arg>65535) || (kind==DM_GUEST_TIMER && arg>31) ||
                  (kind==DM_GUEST_OBSERVATION && (!arg || arg>=256)) ||
                  (kind==DM_GUEST_INDIRECT_HOST && (arg>30 || arg==18)) ||
-                 (kind!=DM_GUEST_SVC && kind!=DM_GUEST_TIMER &&
-                  !(version == 2 && (kind==DM_GUEST_OBSERVATION || kind==DM_GUEST_INDIRECT_HOST ||
-                                    (package->checked_stack && kind==DM_GUEST_STACK_CHECK))))) ||
-                (version == 2 && (u32(record+28) || (original&3) ||
+                  (kind!=DM_GUEST_SVC && kind!=DM_GUEST_TIMER &&
+                   !(version >= 2 && (kind==DM_GUEST_OBSERVATION || kind==DM_GUEST_INDIRECT_HOST ||
+                                     (package->checked_stack && kind==DM_GUEST_STACK_CHECK) ||
+                                     (version==3 && package->checked_stack &&
+                                      kind==DM_GUEST_EXACT_GUEST && arg==17))))) ||
+                (version >= 2 && (u32(record+28) || (original&3) ||
                     !in_segment(*package,original,4,DM_GUEST_EXEC) || original >= original_size)) ||
                 u32(package->bytes.data()+off-4)!=0xd63f03c0u ||
                 !gate_offsets.insert(static_cast<size_t>(off)).second)
                 return fail(error,"invalid gate record");
             package->gates.push_back({static_cast<size_t>(off),kind,arg});
-            if (version == 2) package->gate_provenance.push_back({off,original,kind,arg,u32(record+24),u32(record+28)});
+            if (version >= 2) package->gate_provenance.push_back({off,original,kind,arg,u32(record+24),u32(record+28)});
         }
         for (uint64_t i=0;i<counts[2];++i) {
             const uint8_t* record=blob+tables[2].offset+i*16;
@@ -402,7 +441,27 @@ bool decode_package(const uint8_t* blob, size_t size, const uint8_t* expected_di
             package->parameters.push_back({u64(r),u64(r+8),u32(r+16),u32(r+20),u32(r+24),u32(r+28),u32(r+32)});
         }
         const char* profile_error=nullptr;
-        if (!validate_observation_profile(*package,&profile_error)) return fail(error,profile_error);
+        if(version==3) {
+            package->exact_guest_records=std::move(decoded_contract.exact_guest);
+            package->returning_retire_records=std::move(decoded_contract.returning_retire);
+            package->exact_guest_table_sha256=decoded_contract.exact_guest_table_sha256;
+            package->returning_retire_table_sha256=decoded_contract.returning_retire_table_sha256;
+            package->final_independent_roots_sha256=decoded_contract.final_independent_roots_sha256;
+            package->whole_function_ownership_proof_sha256=decoded_contract.whole_function_ownership_proof_sha256;
+            ModulePackage compatible=*package;
+            compatible.wire_version=2;
+            compatible.required_flags&=DM_MODULE_REQUIRE_DIAG_ABORT_V1;
+            compatible.exact_guest_records.clear();compatible.returning_retire_records.clear();
+            compatible.exact_guest_table_sha256={};compatible.returning_retire_table_sha256={};
+            compatible.final_independent_roots_sha256={};compatible.whole_function_ownership_proof_sha256={};
+            compatible.gates.clear();compatible.gate_provenance.clear();
+            for(size_t i=0;i<package->gates.size();++i)if(package->gates[i].kind!=DM_GUEST_EXACT_GUEST) {
+                compatible.gates.push_back(package->gates[i]);
+                compatible.gate_provenance.push_back(package->gate_provenance[i]);
+            }
+            if(!validate_observation_profile(compatible,&profile_error))return fail(error,profile_error);
+            package->profile=compatible.profile;
+        } else if (!validate_observation_profile(*package,&profile_error)) return fail(error,profile_error);
         package->refresh_view();
         if(package->checked_stack) {
             package->stack_identity_=package_identity(*package);
@@ -413,6 +472,85 @@ bool decode_package(const uint8_t* blob, size_t size, const uint8_t* expected_di
         *out=std::move(package);
         return true;
     } catch (const std::bad_alloc&) { return fail(error,"module package allocation failed"); }
+}
+
+bool decode_package_with_audits(const uint8_t* blob,size_t size,const uint8_t* expected_digest,
+                    const TrustedCallbackAudit* callback_audit,
+                    const TrustedGuestContractAuditV1* contract_audit,
+                    std::unique_ptr<ModulePackage>* out,std::string* error,
+                    const ModuleLimits& limits) {
+    if(error)error->clear();
+    if(!out)return fail(error,"missing package output");
+    out->reset();
+    if(callback_audit && contract_audit)
+        return fail(error,"callback and guest-contract audits target different package versions");
+    if(callback_audit) {
+        const auto& audit=*callback_audit;
+        // Bound caller-supplied counts before decoding or allocating a root list.
+        if(!limits_valid(limits) || !blob || size<384 || size>limits.package_bytes ||
+           audit.version!=1 || audit.root_kind!=CallbackRootKind::DefinedSttFunc ||
+           (audit.indirect_policy!=CallbackIndirectPolicy::Strict &&
+            audit.indirect_policy!=CallbackIndirectPolicy::GuardedHost) ||
+           audit.root_count>limits.callback_roots || (audit.root_count && !audit.roots) ||
+           memcmp(blob,"DMAMOD02",8) || u32(blob+8)!=2 ||
+           audit.root_count>u64(blob+48)/4)
+            return fail(error,"invalid or unsupported trusted callback audit");
+        if(!expected_digest || memcmp(audit.package_sha256.data(),expected_digest,32) ||
+           memcmp(audit.source_sha256.data(),blob+216,32))
+            return fail(error,"callback audit package/source identity mismatch");
+        for(size_t i=0;i<audit.root_count;++i) {
+            const uint64_t root=audit.roots[i],text=u64(blob+40),text_size=u64(blob+48);
+            if((root&3) || root<text || !range(root-text,4,text_size) ||
+               (i && audit.roots[i-1]>=root))
+                return fail(error,"callback audit roots must be sorted unique original-text entries");
+        }
+    }
+    if(contract_audit) {
+        const auto& audit=*contract_audit;
+        if(!limits_valid(limits) || !blob || size<512 || size>limits.package_bytes ||
+           memcmp(blob,"DMAMOD03",8) || u32(blob+8)!=3 ||
+           audit.schema!=1 || audit.flags)
+            return fail(error,"invalid or unsupported trusted guest-contract audit");
+        if(!expected_digest || memcmp(audit.package_sha256.data(),expected_digest,32) ||
+           memcmp(audit.source_sha256.data(),blob+216,32) ||
+           memcmp(audit.build_id.data(),blob+184,32))
+            return fail(error,"guest-contract audit package/source/build identity mismatch");
+    }
+    std::unique_ptr<ModulePackage> package;
+    if(!decode_package(blob,size,expected_digest,&package,error,limits))return false;
+    try {
+        if(callback_audit) {
+            const auto& audit=*callback_audit;
+            const bool guarded=std::any_of(package->gates.begin(),package->gates.end(),
+                [](const DmGuestGate& gate){return gate.kind==DM_GUEST_INDIRECT_HOST;});
+            if(guarded && audit.indirect_policy==CallbackIndirectPolicy::Strict)
+                return fail(error,"strict callback audit contains guarded-host gates");
+            if(!validate_callback_symbols(*package,audit,error))return false;
+            if(audit.root_count)package->callback_roots_.assign(audit.roots,audit.roots+audit.root_count);
+            package->callback_indirect_policy_=audit.indirect_policy;
+            package->callback_identity_=package_identity(*package);package->callback_admitted_=true;
+        }
+        if(contract_audit) {
+            DecodedGuestContractV1 decoded{};
+            decoded.required_flags=(package->checked_stack?1u:0u)|package->required_flags;
+            decoded.exact_guest=package->exact_guest_records;
+            decoded.returning_retire=package->returning_retire_records;
+            decoded.exact_guest_table_sha256=package->exact_guest_table_sha256;
+            decoded.returning_retire_table_sha256=package->returning_retire_table_sha256;
+            decoded.final_independent_roots_sha256=package->final_independent_roots_sha256;
+            decoded.whole_function_ownership_proof_sha256=package->whole_function_ownership_proof_sha256;
+            GuestContractWireError audit_error=GuestContractWireError::Ok;
+            if(!validate_guest_contract_audit_v1(decoded,*contract_audit,
+                   package->capsule_sha256_.data(),package->source_sha256.data(),package->build_id.data(),
+                   guest_contract_digest,nullptr,&audit_error))
+                return fail(error,std::string("guest-contract admission failed: ")+guest_contract_error(audit_error));
+            auto token=std::make_unique<ModulePackage::GuestContractAdmissionTokenV1>();
+            token->package_identity=package_identity(*package);
+            token->audit_identity=contract_audit->audit_identity_sha256;
+            package->guest_contract_admission_=std::move(token);
+        }
+        *out=std::move(package);return true;
+    } catch(const std::bad_alloc&) {return fail(error,"trusted package audit allocation failed");}
 }
 
 bool read_package_fd(int fd, const uint8_t* expected_digest, std::unique_ptr<ModulePackage>* out,
@@ -698,6 +836,37 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
     if(!limits_valid(limits) || packages.empty() || packages.size()>limits.module_count)
         return fail(error,"invalid process module count or limits");
     try {
+        // Scan the complete input graph before parsing, resolving, mapping or
+        // publishing any member.  A later v3 module therefore cannot leave an
+        // earlier v2 module transiently mapped.  Typed v3 authority must first
+        // match its private post-decode admission, even though this foundation
+        // deliberately has no v3 execution path.
+        bool contains_v3=false;
+        for(const auto& package:packages)if(package && package->wire_version==3) {
+            contains_v3=true;
+            const uint32_t typed=package->required_flags&
+                (DM_MODULE_REQUIRE_EXACT_GUEST_V1|DM_MODULE_REQUIRE_RETURNING_RETIRE_V1);
+            const std::array<uint8_t,32> empty{};
+            const bool exact=!package->exact_guest_records.empty();
+            const bool retire=!package->returning_retire_records.empty();
+            if((package->required_flags&~(DM_MODULE_REQUIRE_DIAG_ABORT_V1|
+                    DM_MODULE_REQUIRE_EXACT_GUEST_V1|DM_MODULE_REQUIRE_RETURNING_RETIRE_V1)) ||
+               ((package->required_flags&DM_MODULE_REQUIRE_DIAG_ABORT_V1) && !package->checked_stack) ||
+               ((typed!=0) && !package->checked_stack) ||
+               exact!=bool(typed&DM_MODULE_REQUIRE_EXACT_GUEST_V1) ||
+               retire!=bool(typed&DM_MODULE_REQUIRE_RETURNING_RETIRE_V1) ||
+               exact!=(package->exact_guest_table_sha256!=empty) ||
+               retire!=(package->returning_retire_table_sha256!=empty))
+                return fail(error,"invalid or altered DMAMOD03 public contract metadata");
+            if(typed) {
+                if(!package->guest_contract_admission_)
+                    return fail(error,"DMAMOD03 typed records require trusted guest-contract admission");
+                if(package->guest_contract_admission_->package_identity!=package_identity(*package))
+                    return fail(error,"DMAMOD03 guest-contract admission is stale or package data changed");
+            }
+        }
+        if(contains_v3)
+            return fail(error,"DMAMOD03 execution is unavailable in the host-only foundation");
         std::vector<std::unique_ptr<LoadedModule>> candidate;
         std::unordered_set<std::string> names;
         size_t total=0;

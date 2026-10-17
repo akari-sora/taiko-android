@@ -2,6 +2,7 @@
 #include "guest_abi.h"
 #include "observation_profile.h"
 #include "diag_abort_abi.h"
+#include "guest_contract_abi.h"
 #include <array>
 #include <memory>
 #include <string>
@@ -55,6 +56,11 @@ struct ModulePackage {
     const ObservationProfile* profile = nullptr;
     std::vector<GateProvenance> gate_provenance;
     std::vector<ParameterRecord> parameters;
+    std::vector<ExactGuestRecordV1> exact_guest_records;
+    std::vector<ReturningRetireRecordV1> returning_retire_records;
+    std::array<uint8_t,32> exact_guest_table_sha256{}, returning_retire_table_sha256{};
+    std::array<uint8_t,32> final_independent_roots_sha256{};
+    std::array<uint8_t,32> whole_function_ownership_proof_sha256{};
     std::vector<RewriteSite> sites;
     std::vector<DmGuestSegment> segments;
     DmGuestImage image{};
@@ -65,6 +71,11 @@ private:
     friend bool decode_package(const uint8_t*,size_t,const uint8_t*,std::unique_ptr<ModulePackage>*,std::string*,const ModuleLimits&);
     friend bool decode_package_with_callback_audit(const uint8_t*, size_t, const uint8_t*,
         const TrustedCallbackAudit&, std::unique_ptr<ModulePackage>*, std::string*, const ModuleLimits&);
+    friend bool decode_package_with_guest_contract_audit(const uint8_t*, size_t, const uint8_t*,
+        const TrustedGuestContractAuditV1&, std::unique_ptr<ModulePackage>*, std::string*, const ModuleLimits&);
+    friend bool decode_package_with_audits(const uint8_t*, size_t, const uint8_t*,
+        const TrustedCallbackAudit*, const TrustedGuestContractAuditV1*,
+        std::unique_ptr<ModulePackage>*, std::string*, const ModuleLimits&);
     bool callback_admitted_ = false;
     CallbackIndirectPolicy callback_indirect_policy_ = CallbackIndirectPolicy::Strict;
     std::array<uint8_t,32> callback_identity_{};
@@ -76,6 +87,10 @@ private:
     bool capsule_verified_ = false;
     uint64_t capsule_bytes_ = 0;
     std::array<uint8_t,32> capsule_sha256_{};
+    struct GuestContractAdmissionTokenV1 {
+        std::array<uint8_t,32> package_identity{}, audit_identity{};
+    };
+    std::unique_ptr<GuestContractAdmissionTokenV1> guest_contract_admission_;
 };
 // Standalone preparation is legacy-only. Checked packages require Process
 // ownership so their executable spans participate in entry preflight.
@@ -90,6 +105,17 @@ bool decode_package(const uint8_t* blob, size_t size, const uint8_t* expected_di
                     const ModuleLimits& limits = {});
 bool decode_package_with_callback_audit(const uint8_t* blob, size_t size,
                     const uint8_t* expected_digest, const TrustedCallbackAudit& audit,
+                    std::unique_ptr<ModulePackage>* out, std::string* error,
+                    const ModuleLimits& limits = {});
+bool decode_package_with_guest_contract_audit(const uint8_t* blob, size_t size,
+                    const uint8_t* expected_digest, const TrustedGuestContractAuditV1& audit,
+                    std::unique_ptr<ModulePackage>* out, std::string* error,
+                    const ModuleLimits& limits = {});
+// One raw decode followed by zero or more private audit admissions.  Public
+// wrappers above cannot manufacture the private contract token.
+bool decode_package_with_audits(const uint8_t* blob, size_t size,
+                    const uint8_t* expected_digest, const TrustedCallbackAudit* callback_audit,
+                    const TrustedGuestContractAuditV1* contract_audit,
                     std::unique_ptr<ModulePackage>* out, std::string* error,
                     const ModuleLimits& limits = {});
 // Reads from offset zero with pread; does not close/change caller's descriptor.

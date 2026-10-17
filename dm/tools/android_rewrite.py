@@ -19,6 +19,9 @@ import sys
 import android_exclusive
 import android_diag_abort
 import android_observation
+from android_guest_contract import (DM_GUEST_EXACT_GUEST, ExactGuestRecordV1,
+                                    ReturningRetireRecordV1, pack_exact_guest_table,
+                                    pack_returning_retire_table, table_digest)
 from android_instruction import Instruction
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, CS_GRP_CALL, CS_GRP_JUMP, CS_GRP_RET
@@ -26,7 +29,7 @@ from capstone.arm64_const import ARM64_OP_MEM, ARM64_OP_REG, ARM64_OP_IMM
 
 ABI = 0x444D4101
 STATE_HELPER, DISPATCH_HELPER = 1, 2
-SVC, TIMER, OBS, INDIRECT_HOST, STACK_CHECK = 1, 2, 3, 4, 5
+SVC, TIMER, OBS, INDIRECT_HOST, STACK_CHECK, EXACT_GUEST = 1, 2, 3, 4, 5, DM_GUEST_EXACT_GUEST
 SVC_MONITOR_RETIRE = frozenset((0x1A, 0x36))  # ArbitrateLock can block; retire before host entry.
 EXCLUSIVE_LOADS = {'ldxr', 'ldaxr', 'ldxp', 'ldaxp', 'ldxrb', 'ldaxrb', 'ldxrh', 'ldaxrh'}
 EXCLUSIVE_STORES = {'stxr', 'stlxr', 'stxp', 'stlxp', 'stxrb', 'stlxrb', 'stxrh', 'stlxrh'}
@@ -134,6 +137,8 @@ class Image:
     checked_calls: tuple = ()
     checked_call_forests: tuple = ()
     native_transfer_proofs: tuple = ()
+    exact_guest_records: tuple = ()
+    returning_retire_records: tuple = ()
 
     def metadata(self):
         result = {'target': self.target, 'abi': self.abi, 'size': len(self.bytes),
@@ -161,21 +166,41 @@ class Image:
             result.update(requires_diag_abort_v1=True,required_diag_abort_abi=android_diag_abort.DIAG_ABORT_RESOLVER_V1,
                           diag_abort_call_sites=list(self.diag_abort_call_sites),
                           diag_abort_plt_branches=list(self.diag_abort_plt_branches))
+        if self.package_version == 3:
+            exact = pack_exact_guest_table(self.exact_guest_records)
+            retire = pack_returning_retire_table(self.returning_retire_records)
+            result.update(exact_guest_count=len(self.exact_guest_records),
+                          exact_guest_table_sha256=table_digest(exact).hex(),
+                          returning_retire_count=len(self.returning_retire_records),
+                          returning_retire_table_sha256=table_digest(retire).hex())
         return result
 
     def validate(self):
         size = len(self.bytes)
-        if not isinstance(self.checked_stack, bool) or (self.checked_stack and self.package_version != 2):
-            raise RewriteError('checked stack requires explicit boolean and package version 2')
+        if self.package_version not in (1, 2, 3):
+            raise RewriteError('unsupported package version')
+        if not isinstance(self.checked_stack, bool) or (self.checked_stack and self.package_version not in (2, 3)):
+            raise RewriteError('checked stack requires explicit boolean and package version 2 or 3')
         if (type(self.requires_diag_abort_v1) is not bool or
-                self.requires_diag_abort_v1 and (not self.checked_stack or self.package_version!=2 or self.indirect_policy!='guarded-host') or
+                self.requires_diag_abort_v1 and (not self.checked_stack or self.package_version not in (2, 3) or self.indirect_policy!='guarded-host') or
                 any(type(items) is not tuple or
                     any(type(pc) is not int or pc%4 or not 0<=pc<=size-4 for pc in items) or
                     tuple(sorted(set(items)))!=items
                     for items in (self.diag_abort_call_sites,self.diag_abort_plt_branches)) or
                 self.requires_diag_abort_v1!=bool(self.diag_abort_call_sites) or
                 self.requires_diag_abort_v1!=bool(self.diag_abort_plt_branches)):
-            raise RewriteError('required DiagAbort ABI needs checked v2 and exact consumed source/gate evidence')
+            raise RewriteError('required DiagAbort ABI needs checked package version 2 or 3 and exact consumed source/gate evidence')
+        if type(self.exact_guest_records) is not tuple or type(self.returning_retire_records) is not tuple:
+            raise RewriteError('typed contract vectors must be immutable tuples')
+        try:
+            pack_exact_guest_table(self.exact_guest_records)
+            pack_returning_retire_table(self.returning_retire_records)
+        except ValueError as error:
+            raise RewriteError(str(error)) from error
+        if self.package_version != 3 and (self.exact_guest_records or self.returning_retire_records):
+            raise RewriteError('typed guest contracts require package version 3')
+        if (self.exact_guest_records or self.returning_retire_records) and not self.checked_stack:
+            raise RewriteError('typed guest contracts require checked stack')
         if self.target != 'android-arm64' or self.abi != ABI:
             raise RewriteError('unsupported target/ABI')
         if size == 0 or size % 4 or self.entry_offset % 4 or not 0 <= self.entry_offset <= size - 4:
@@ -194,13 +219,17 @@ class Image:
             if gate.return_offset % 4 or not 4 <= gate.return_offset <= size - 4:
                 raise RewriteError('invalid gate return offset')
             allowed = (SVC, TIMER, OBS) if self.profile is not None else (SVC, TIMER)
-            if self.indirect_policy == 'guarded-host' and self.package_version == 2:
+            if self.indirect_policy == 'guarded-host' and self.package_version in (2, 3):
                 allowed += (INDIRECT_HOST,)
-            if self.checked_stack and self.package_version == 2:
+            if self.checked_stack and self.package_version in (2, 3):
                 allowed += (STACK_CHECK,)
-            maximum = 65535 if gate.kind == SVC else 31 if gate.kind in (TIMER, INDIRECT_HOST) else 0xFFFFFFFF
+            if self.package_version == 3 and self.checked_stack:
+                allowed += (EXACT_GUEST,)
+            maximum = 65535 if gate.kind == SVC else 31 if gate.kind in (TIMER, INDIRECT_HOST) else 17 if gate.kind == EXACT_GUEST else 0xFFFFFFFF
             if gate.kind not in allowed or not 0 <= gate.argument <= maximum:
                 raise RewriteError('invalid gate kind/argument')
+            if gate.kind == EXACT_GUEST and gate.argument != 17:
+                raise RewriteError('exact guest gate argument must be x17')
             if gate.kind == STACK_CHECK and stack_check_operation(gate.argument) is None:
                 raise RewriteError('invalid stack-check word')
             if any(gate.return_offset - 4 < offset + 8 and offset < gate.return_offset + 4 for offset in occupied):
@@ -208,8 +237,21 @@ class Image:
             if gate.return_offset in returns or self.bytes[gate.return_offset - 4:gate.return_offset] != word(0xD63F03C0):
                 raise RewriteError('gate must follow blr x30')
             returns.add(gate.return_offset)
-        if (self.profile is not None or any(g.kind in (INDIRECT_HOST, STACK_CHECK) for g in self.gates)) and len(self.gates) != len(self.gate_provenance):
+        if (self.package_version in (2, 3) and
+                (self.profile is not None or self.gates or self.exact_guest_records or self.returning_retire_records) and
+                len(self.gates) != len(self.gate_provenance)):
             raise RewriteError('gate provenance count mismatch')
+        exact_gates = [(gate, origin) for gate, origin in zip(self.gates, self.gate_provenance)
+                       if gate.kind == EXACT_GUEST]
+        if len(exact_gates) != len(self.exact_guest_records):
+            raise RewriteError('exact record count differs from structural kind-6 gate count')
+        for record in self.exact_guest_records:
+            matches = [(gate, origin) for gate, origin in exact_gates
+                       if gate.return_offset == record.gate_return_offset and gate.argument == 17 and
+                       origin.return_offset == gate.return_offset and origin.original_offset == record.original_br_offset and
+                       origin.original_word == record.original_br_word and origin.flags == 0]
+            if len(matches) != 1:
+                raise RewriteError('exact record lacks one unique canonical gate provenance match')
         for pc in self.diag_abort_plt_branches:
             gates=[gate for gate,origin in zip(self.gates,self.gate_provenance) if
                    origin.original_offset==pc and origin.original_word==0xD61F0220 and origin.flags==0 and
@@ -3663,15 +3705,15 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
     """
     if indirect_policy not in ('strict', 'guarded-host'):
         raise RewriteError('unsupported indirect policy')
-    if package_version not in (1, 2) or (indirect_policy == 'guarded-host' and package_version != 2):
-        raise RewriteError('guarded host transfers require package version 2')
-    if not isinstance(checked_stack, bool) or (checked_stack and package_version != 2):
-        raise RewriteError('checked stack requires explicit boolean and package version 2')
+    if package_version not in (1, 2, 3) or (indirect_policy == 'guarded-host' and package_version not in (2, 3)):
+        raise RewriteError('guarded host transfers require package version 2 or 3')
+    if not isinstance(checked_stack, bool) or (checked_stack and package_version not in (2, 3)):
+        raise RewriteError('checked stack requires explicit boolean and package version 2 or 3')
     if native_transfer_candidates is not None and not isinstance(native_transfer_candidates,Mapping):
         raise RewriteError('native transfer candidates must be an explicit mapping')
     transfer_candidates = dict(native_transfer_candidates or {})
-    if transfer_candidates and (not checked_stack or package_version != 2):
-        raise RewriteError('native transfer candidates require checked v2')
+    if transfer_candidates and (not checked_stack or package_version not in (2, 3)):
+        raise RewriteError('native transfer candidates require checked package version 2 or 3')
     if any(type(pc) is not int or type(target) is not int for pc,target in transfer_candidates.items()):
         raise RewriteError('native transfer candidate offsets/targets must be integers')
     guarded = set(guarded_indirect_offsets)
@@ -3682,15 +3724,15 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
     forest_targets = tuple(checked_call_forest_targets)
     if bool(forest_sites) != bool(forest_targets):
         raise RewriteError('checked call forest requires both source sites and targets')
-    if forest_sites and (not checked_stack or package_version != 2 or
+    if forest_sites and (not checked_stack or package_version not in (2, 3) or
                          forest_sites & (guarded | checked_calls.keys())):
-        raise RewriteError('checked call forest requires checked v2 and disjoint source sites')
+        raise RewriteError('checked call forest requires checked package version 2 or 3 and disjoint source sites')
     if (any(type(pc) is not int for pc in forest_sites) or
             any(type(pc) is not int or pc <= 0 or pc % 4 for pc in forest_targets) or
             any(a >= b for a, b in zip(forest_targets, forest_targets[1:]))):
         raise RewriteError('checked call forest requires sorted unique aligned integer targets')
-    if checked_calls and (not checked_stack or package_version != 2 or checked_calls.keys() & guarded):
-        raise RewriteError('checked calls require checked v2 mode and cannot be host gates')
+    if checked_calls and (not checked_stack or package_version not in (2, 3) or checked_calls.keys() & guarded):
+        raise RewriteError('checked calls require checked package version 2 or 3 and cannot be host gates')
     if any(type(pc) is not int or type(target) is not int for pc, target in checked_calls.items()):
         raise RewriteError('checked call offsets and targets must be integers')
     guest_tables=set(proven_guest_indirect_offsets)
@@ -3865,8 +3907,8 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
                     ins,by_pc,kinds,sys.modules[__name__],
                     monitor_retiring_calls=verified_abort_calls))) is not None and
             candidate.requires_diag_abort_v1 for ins in instructions):
-        if diag_proof.coverage_error or package_version!=2 or not checked_stack or indirect_policy!='guarded-host':
-            raise RewriteError(diag_proof.coverage_error or 'required DiagAbort ABI lacks checked guarded-host v2')
+        if diag_proof.coverage_error or package_version not in (2, 3) or not checked_stack or indirect_policy!='guarded-host':
+            raise RewriteError(diag_proof.coverage_error or 'required DiagAbort ABI lacks checked guarded-host package version 2 or 3')
         for pc in diag_proof.plt_branches:
             if pc not in by_pc or kinds.get(pc) not in (None,'gate'):
                 raise RewriteError('required DiagAbort PLT overlaps an incompatible source rewrite')
@@ -3911,8 +3953,8 @@ def rewrite(raw, entry_offset=0, text_size=None, *, code_ranges=None, patch_offs
     if requires_diag_abort_v1:
         if diag_proof.coverage_error:
             raise RewriteError(diag_proof.coverage_error)
-        if package_version!=2 or not checked_stack or indirect_policy!='guarded-host':
-            raise RewriteError('required DiagAbort ABI requires checked-stack v2 guarded-host policy')
+        if package_version not in (2, 3) or not checked_stack or indirect_policy!='guarded-host':
+            raise RewriteError('required DiagAbort ABI requires checked-stack package version 2 or 3 guarded-host policy')
         # A writable GOT cannot retarget a consumed abort to an ordinary HLE.
         # Every selected matching PLT is gated for native canonical enforcement.
         for pc in diag_proof.plt_branches:

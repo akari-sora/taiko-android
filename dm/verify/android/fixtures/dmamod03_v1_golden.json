@@ -1,0 +1,220 @@
+{
+  "audit": {
+    "audit_identity_sha256": "2366ffd6f30d50715ffa9eda908c4f7fbe0a38903dc54ff28d087029d672e9ac",
+    "canonical": "{\"build_id\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"exact_guest\":{\"count\":1,\"table_sha256\":\"77b492104ec3c5ec7ea53e6ff9b74963079ba48737f1bf1b40166e67246680b9\"},\"final_independent_roots_sha256\":\"06ef0ec5e420e4fd490f0dbe032a692ae280a7f0fccb0a232831fc4487467a6f\",\"flags\":0,\"package_sha256\":\"7777777777777777777777777777777777777777777777777777777777777777\",\"returning_retire\":{\"count\":1,\"table_sha256\":\"0d7c9576c35b0029187220bcf8a8efc5f13b96475e5b7606a06601234668d234\"},\"schema\":1,\"source_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"toolset_recipe_sha256\":\"dc658a0f27979ea4c7a7f1cd4154a77b98aecb792882bc9930192d4356778ffd\",\"whole_function_ownership_proof_sha256\":\"e657df979617971861a6720edfe305b96cef07fa9c0d7c573ee7e437f46d30fd\"}",
+    "object_without_identity": {
+      "build_id": "2222222222222222222222222222222222222222222222222222222222222222",
+      "exact_guest": {
+        "count": 1,
+        "table_sha256": "77b492104ec3c5ec7ea53e6ff9b74963079ba48737f1bf1b40166e67246680b9"
+      },
+      "final_independent_roots_sha256": "06ef0ec5e420e4fd490f0dbe032a692ae280a7f0fccb0a232831fc4487467a6f",
+      "flags": 0,
+      "package_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "returning_retire": {
+        "count": 1,
+        "table_sha256": "0d7c9576c35b0029187220bcf8a8efc5f13b96475e5b7606a06601234668d234"
+      },
+      "schema": 1,
+      "source_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "toolset_recipe_sha256": "dc658a0f27979ea4c7a7f1cd4154a77b98aecb792882bc9930192d4356778ffd",
+      "whole_function_ownership_proof_sha256": "e657df979617971861a6720edfe305b96cef07fa9c0d7c573ee7e437f46d30fd"
+    }
+  },
+  "eh_kind_0_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "eh_kind_1": {
+    "preimage_hex": "45584143545f47554553545f45485f5631000100000000000000000200000000000040020000000000008008000000000000000900000000000011000000000000000c0000000000000001000178101e0c1f001800000000000000140000001000000000020000000000004000000000000000",
+    "sha256": "a060c25cc21845599e67e22aaa5453bc094d8a151999b57107ac1349dd56bb94"
+  },
+  "exact_record": {
+    "hex": "01000000000000004040000000000000400100000000000020021fd611000000400a00000000000003000000020400000700000002010000fbffffffffffffff10000000050000000100000001000000000200000000000040000000000000001002000000000000000200000000000040020000000000000009000000000000800800000000000010020000000000008ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8b890c3b3ace3536ed15d951bfb340ae64a92f637d35d354998d912bf193db9c1a060c25cc21845599e67e22aaa5453bc094d8a151999b57107ac1349dd56bb9406ef0ec5e420e4fd490f0dbe032a692ae280a7f0fccb0a232831fc4487467a6f00000000000000000000000000000000",
+    "sha256": "77b492104ec3c5ec7ea53e6ff9b74963079ba48737f1bf1b40166e67246680b9"
+  },
+  "function": {
+    "hex": "fd7bbfa9fd030091e00300aa000080d2fd7bc1a8c0035fd6",
+    "sha256": "b890c3b3ace3536ed15d951bfb340ae64a92f637d35d354998d912bf193db9c1"
+  },
+  "ownership": {
+    "canonical": "{\"build_id\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"calls\":[{\"callsite\":\"0x0000000000000300\",\"normal_return\":\"0x0000000000000304\",\"original_bl_word\":\"0x94000040\",\"target\":\"0x0000000000000400\"},{\"callsite\":\"0x0000000000000320\",\"normal_return\":\"0x0000000000000324\",\"original_bl_word\":\"0x94000048\",\"target\":\"0x0000000000000440\"}],\"direct_incoming\":[{\"from\":\"0x0000000000000280\",\"kind\":\"ROOT\",\"to\":\"0x0000000000000280\"},{\"from\":\"0x00000000000002fc\",\"kind\":\"FALLTHROUGH\",\"to\":\"0x0000000000000300\"}],\"exclusive\":{\"head\":\"0x00000000000002c0\",\"store\":\"0x00000000000002e0\"},\"final_roots\":[\"0x0000000000000010\",\"0x0000000000000210\"],\"function\":{\"cie\":\"0x0000000000000880\",\"end\":\"0x0000000000000380\",\"fde\":\"0x0000000000000900\",\"function_sha256\":\"b890c3b3ace3536ed15d951bfb340ae64a92f637d35d354998d912bf193db9c1\",\"start\":\"0x0000000000000280\"},\"independent_roots\":[\"0x0000000000000010\",\"0x0000000000000210\"],\"leave_monitor\":{\"clrex_sites\":[\"0x0000000000000340\"],\"entry\":\"0x0000000000000280\",\"head\":\"0x00000000000002c0\",\"store\":\"0x00000000000002e0\",\"terminal_facts\":[{\"kind\":\"SVC_1B\",\"live\":false,\"pc\":\"0x0000000000000350\"},{\"kind\":\"EXCEPTIONAL_CALL\",\"live\":false,\"pc\":\"0x0000000000000360\"},{\"kind\":\"RET\",\"live\":false,\"pc\":\"0x000000000000037c\"}]},\"restores\":[{\"ordinal\":0,\"original_word\":\"0xa94153f3\",\"pc\":\"0x0000000000000364\"},{\"ordinal\":1,\"original_word\":\"0xa9425bf5\",\"pc\":\"0x0000000000000368\"},{\"ordinal\":2,\"original_word\":\"0xa94363f7\",\"pc\":\"0x000000000000036c\"},{\"ordinal\":3,\"original_word\":\"0xa9446bf9\",\"pc\":\"0x0000000000000370\"},{\"ordinal\":4,\"original_word\":\"0xa8c47bfd\",\"pc\":\"0x0000000000000374\"},{\"ordinal\":5,\"original_word\":\"0xd65f03c0\",\"pc\":\"0x000000000000037c\"}],\"schema\":1,\"source_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"state_facts\":[{\"dead_in\":true,\"live_in\":false,\"outcomes\":[\"DEAD_TO_DEAD\"],\"pc\":\"0x0000000000000304\",\"successors\":[\"0x0000000000000308\"],\"transfer\":\"LINEAR\"},{\"dead_in\":false,\"live_in\":true,\"outcomes\":[\"LIVE_TO_DEAD\"],\"pc\":\"0x0000000000000340\",\"successors\":[\"0x0000000000000344\"],\"transfer\":\"CLREX\"}],\"tool_hashes\":[{\"path\":\"dm/tools/android_exclusive.py\",\"sha256\":\"3333333333333333333333333333333333333333333333333333333333333333\"},{\"path\":\"dm/tools/nso_eh.py\",\"sha256\":\"4444444444444444444444444444444444444444444444444444444444444444\"}],\"verdict\":\"PASS\"}",
+    "object": {
+      "build_id": "2222222222222222222222222222222222222222222222222222222222222222",
+      "calls": [
+        {
+          "callsite": "0x0000000000000300",
+          "normal_return": "0x0000000000000304",
+          "original_bl_word": "0x94000040",
+          "target": "0x0000000000000400"
+        },
+        {
+          "callsite": "0x0000000000000320",
+          "normal_return": "0x0000000000000324",
+          "original_bl_word": "0x94000048",
+          "target": "0x0000000000000440"
+        }
+      ],
+      "direct_incoming": [
+        {
+          "from": "0x0000000000000280",
+          "kind": "ROOT",
+          "to": "0x0000000000000280"
+        },
+        {
+          "from": "0x00000000000002fc",
+          "kind": "FALLTHROUGH",
+          "to": "0x0000000000000300"
+        }
+      ],
+      "exclusive": {
+        "head": "0x00000000000002c0",
+        "store": "0x00000000000002e0"
+      },
+      "final_roots": [
+        "0x0000000000000010",
+        "0x0000000000000210"
+      ],
+      "function": {
+        "cie": "0x0000000000000880",
+        "end": "0x0000000000000380",
+        "fde": "0x0000000000000900",
+        "function_sha256": "b890c3b3ace3536ed15d951bfb340ae64a92f637d35d354998d912bf193db9c1",
+        "start": "0x0000000000000280"
+      },
+      "independent_roots": [
+        "0x0000000000000010",
+        "0x0000000000000210"
+      ],
+      "leave_monitor": {
+        "clrex_sites": [
+          "0x0000000000000340"
+        ],
+        "entry": "0x0000000000000280",
+        "head": "0x00000000000002c0",
+        "store": "0x00000000000002e0",
+        "terminal_facts": [
+          {
+            "kind": "SVC_1B",
+            "live": false,
+            "pc": "0x0000000000000350"
+          },
+          {
+            "kind": "EXCEPTIONAL_CALL",
+            "live": false,
+            "pc": "0x0000000000000360"
+          },
+          {
+            "kind": "RET",
+            "live": false,
+            "pc": "0x000000000000037c"
+          }
+        ]
+      },
+      "restores": [
+        {
+          "ordinal": 0,
+          "original_word": "0xa94153f3",
+          "pc": "0x0000000000000364"
+        },
+        {
+          "ordinal": 1,
+          "original_word": "0xa9425bf5",
+          "pc": "0x0000000000000368"
+        },
+        {
+          "ordinal": 2,
+          "original_word": "0xa94363f7",
+          "pc": "0x000000000000036c"
+        },
+        {
+          "ordinal": 3,
+          "original_word": "0xa9446bf9",
+          "pc": "0x0000000000000370"
+        },
+        {
+          "ordinal": 4,
+          "original_word": "0xa8c47bfd",
+          "pc": "0x0000000000000374"
+        },
+        {
+          "ordinal": 5,
+          "original_word": "0xd65f03c0",
+          "pc": "0x000000000000037c"
+        }
+      ],
+      "schema": 1,
+      "source_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "state_facts": [
+        {
+          "dead_in": true,
+          "live_in": false,
+          "outcomes": [
+            "DEAD_TO_DEAD"
+          ],
+          "pc": "0x0000000000000304",
+          "successors": [
+            "0x0000000000000308"
+          ],
+          "transfer": "LINEAR"
+        },
+        {
+          "dead_in": false,
+          "live_in": true,
+          "outcomes": [
+            "LIVE_TO_DEAD"
+          ],
+          "pc": "0x0000000000000340",
+          "successors": [
+            "0x0000000000000344"
+          ],
+          "transfer": "CLREX"
+        }
+      ],
+      "tool_hashes": [
+        {
+          "path": "dm/tools/android_exclusive.py",
+          "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+        },
+        {
+          "path": "dm/tools/nso_eh.py",
+          "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+        }
+      ],
+      "verdict": "PASS"
+    },
+    "sha256": "e657df979617971861a6720edfe305b96cef07fa9c0d7c573ee7e437f46d30fd"
+  },
+  "recipe": {
+    "canonical": "{\"files\":[{\"path\":\"dm/tools/android_guest_contract.py\",\"sha256\":\"5555555555555555555555555555555555555555555555555555555555555555\"},{\"path\":\"dm/tools/nso_format.py\",\"sha256\":\"6666666666666666666666666666666666666666666666666666666666666666\"}],\"schema\":1}",
+    "object": {
+      "files": [
+        {
+          "path": "dm/tools/android_guest_contract.py",
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        {
+          "path": "dm/tools/nso_format.py",
+          "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        }
+      ],
+      "schema": 1
+    },
+    "sha256": "dc658a0f27979ea4c7a7f1cd4154a77b98aecb792882bc9930192d4356778ffd"
+  },
+  "retire_record": {
+    "hex": "010000000000000000030000000000004000009408000000000400000000000004030000000000008040000000000000c002000000000000e0020000000000008002000000000000800300000000000000090000000000008008000000000000b890c3b3ace3536ed15d951bfb340ae64a92f637d35d354998d912bf193db9c106ef0ec5e420e4fd490f0dbe032a692ae280a7f0fccb0a232831fc4487467a6fe657df979617971861a6720edfe305b96cef07fa9c0d7c573ee7e437f46d30fd",
+    "sha256": "0d7c9576c35b0029187220bcf8a8efc5f13b96475e5b7606a06601234668d234"
+  },
+  "roots": {
+    "offsets": [
+      16,
+      528
+    ],
+    "preimage_hex": "10000000000000001002000000000000",
+    "sha256": "06ef0ec5e420e4fd490f0dbe032a692ae280a7f0fccb0a232831fc4487467a6f"
+  },
+  "schema": 1,
+  "symbol_name": {
+    "hex": "616c706861",
+    "sha256": "8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8"
+  },
+  "synthetic_only": true
+}
