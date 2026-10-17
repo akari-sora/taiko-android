@@ -197,8 +197,14 @@ const DmGuestGate* exact_plt_gate(const ModulePackage& p,uint64_t plt) {
     return (p.wire_version==3 && p.checked_stack)?plt_kind_gate(p,plt,DM_GUEST_EXACT_GUEST):nullptr;
 }
 bool validate_v3_lowered_premap(const ModulePackage& p) {
-    if(p.wire_version!=3 || !p.checked_stack ||
-       p.exact_guest_records.size()!=5 || p.returning_retire_records.size()!=2)return false;
+    if(p.wire_version!=3 || !p.checked_stack)return false;
+    if(p.exact_guest_records.empty() && p.returning_retire_records.empty()) {
+        if(p.required_flags&(DM_MODULE_REQUIRE_EXACT_GUEST_V1|DM_MODULE_REQUIRE_RETURNING_RETIRE_V1))
+            return false;
+        for(const auto& g:p.gates)if(g.kind==DM_GUEST_EXACT_GUEST)return false;
+        return true;
+    }
+    if(p.exact_guest_records.size()!=5 || p.returning_retire_records.size()!=2)return false;
     for(size_t i=0;i<p.returning_retire_records.size();++i) {
         const auto& r=p.returning_retire_records[i];
         if(r.stub_extent!=8 || !range(r.source_callsite,4,p.original_size) ||
@@ -915,6 +921,7 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
         // match its private post-decode admission, even though this foundation
         // deliberately has no v3 execution path.
         bool contains_v3=false;
+        bool has_lowered_v3_contract=false;
         for(const auto& package:packages)if(package && package->wire_version==3) {
             contains_v3=true;
             const uint32_t typed=package->required_flags&
@@ -939,10 +946,13 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
             }
             if(!validate_v3_lowered_premap(*package))
                 return fail(error,"DMAMOD03 execution is unavailable in the host-only foundation");
+            if(exact) has_lowered_v3_contract=true;
         }
         if(contains_v3) {
+            if(!has_lowered_v3_contract)
+                return fail(error,"DMAMOD03 execution is unavailable in the host-only foundation");
             for(const auto& package:packages)
-                if(!package || !package->checked_stack || !package->stack_admitted_)
+                if(!package || package->wire_version!=3 || !package->checked_stack || !package->stack_admitted_)
                     return fail(error,"DMAMOD03 execution is unavailable in the host-only foundation");
         }
         std::vector<std::unique_ptr<LoadedModule>> candidate;
@@ -986,10 +996,11 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
             if(!parse_dynamic(*m->package,m->dynamic.get(),error)) return false;
             if(m->package->wire_version==3) {
                 for(const auto& x:m->package->exact_guest_records) {
-                    if(x.relocation_index>=m->dynamic->jmprel_count || x.relocation_type!=1026 ||
+                    if(x.relocation_index<m->dynamic->jmprel_offset_index ||
+                       x.relocation_index>=m->dynamic->relocations.size() || x.relocation_type!=1026 ||
                        x.relocation_addend!=0 || !x.symbol_index || x.symbol_index>=m->dynamic->symbols.size())
                         return fail(error,m->package->name+": exact-guest relocation index or type mismatch");
-                    const auto& rel=m->dynamic->relocations[m->dynamic->jmprel_offset_index+x.relocation_index];
+                    const auto& rel=m->dynamic->relocations[x.relocation_index];
                     if(rel.r_offset!=x.got_offset || ELF64_R_TYPE(rel.r_info)!=x.relocation_type ||
                        ELF64_R_SYM(rel.r_info)!=x.symbol_index || rel.r_addend!=x.relocation_addend)
                         return fail(error,m->package->name+": exact-guest JMPREL entry disagrees with record");
@@ -1027,7 +1038,7 @@ bool Process::load(std::vector<std::unique_ptr<ModulePackage>> packages,
                 }
                 if(exact_rec) {
                     if(rel_pos<m->dynamic->jmprel_offset_index ||
-                       rel_pos-m->dynamic->jmprel_offset_index!=exact_rec->relocation_index ||
+                       rel_pos!=exact_rec->relocation_index ||
                        ELF64_R_TYPE(r.r_info)!=1026 || r.r_addend!=0 || !s.st_shndx || s.st_shndx==SHN_ABS)
                         return fail(error,m->package->name+": invalid exact-guest relocation binding");
                     uintptr_t forced_addr=0;

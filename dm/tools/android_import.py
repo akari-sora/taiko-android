@@ -1014,7 +1014,7 @@ def import_module(source, name, *, package_version=1, profile=None, indirect_pol
                     checked_call_forest_offsets=tuple(caller['offset'] for caller in forest_contract['callers']) if forest_contract else (),
                     checked_call_forest_targets=forest_contract['targets'] if forest_contract else (),
                     native_transfer_candidates={row['offset']:row['target'] for row in code_report['native_transfer_candidates']},
-                    guest_contract_source=bytes(source) if package_version == 3 and (checked_stack or indirect_policy == 'guarded-host' or name == 'sdk') else None)
+                    guest_contract_source=bytes(source) if package_version == 3 and name == 'sdk' else None)
     package = make_package(name, nso, metadata, image, patch_offset, package_version)
     report = {'name': name, 'source_sha256': nso.source_sha256.hex(), 'build_id': nso.build_id.hex(),
               'image_sha256': hashlib.sha256(image.bytes).hexdigest(), 'package_sha256': hashlib.sha256(package).hexdigest(),

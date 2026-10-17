@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import unittest
@@ -43,6 +44,8 @@ class OriginalV3BoundaryTests(unittest.TestCase):
         run = EVIDENCE / "boundary-runs" / ("d2r-v3-pins-" + uuid.uuid4().hex)
         self.assertFalse(run.exists(), "boundary run directory must be unique")
         run.mkdir(parents=True)
+        if not os.environ.get("DM_TEST_OUTPUT_ROOT"):
+            self.addCleanup(shutil.rmtree, run, ignore_errors=True)
         results = {}
         for name, package in (("empty", self.empty), ("nonempty", self.full)):
             path = run / f"{name}.dmag"
@@ -58,6 +61,8 @@ class OriginalV3BoundaryTests(unittest.TestCase):
         run = EVIDENCE / "boundary-runs" / ("d2r-v3-graph-" + uuid.uuid4().hex)
         self.assertFalse(run.exists(), "boundary run directory must be unique")
         run.mkdir(parents=True)
+        if not os.environ.get("DM_TEST_OUTPUT_ROOT"):
+            self.addCleanup(shutil.rmtree, run, ignore_errors=True)
         platform = LIVE / "dm/platform/android"
         source = r'''
 #include <array>

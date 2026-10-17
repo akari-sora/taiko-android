@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import sys
@@ -47,6 +48,8 @@ class NativeGuestContractTests(unittest.TestCase):
         run = EVIDENCE / "native-runs" / ("dmamod03-" + uuid.uuid4().hex)
         self.assertFalse(run.exists(), "native run directory must be unique")
         run.mkdir(parents=True)
+        if not os.environ.get("DM_TEST_OUTPUT_ROOT"):
+            self.addCleanup(shutil.rmtree, run, ignore_errors=True)
         package_sha = hashlib.sha256(self.nonempty).digest()
         body = copy.deepcopy(self.golden["audit"]["object_without_identity"])
         body["package_sha256"] = package_sha.hex()
@@ -151,7 +154,7 @@ int main(){
                    f'"{cpp}" "{platform / "guest_contract_wire.cpp"}" bcrypt.lib /Fe:"{exe}"')
         batch = run / "build.cmd"
         batch.write_text("@echo off\r\n" + command + "\r\n", encoding="ascii")
-        compiled = subprocess.run(["cmd.exe", "/d", "/c", str(batch)], capture_output=True, text=True)
+        compiled = subprocess.run(["cmd.exe", "/d", "/c", str(batch)], capture_output=True, text=True, cwd=str(run))
         (run / "compile.stdout.log").write_text(compiled.stdout, encoding="utf-8")
         (run / "compile.stderr.log").write_text(compiled.stderr, encoding="utf-8")
         self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)

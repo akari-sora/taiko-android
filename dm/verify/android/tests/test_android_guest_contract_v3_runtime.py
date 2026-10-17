@@ -51,6 +51,8 @@ class RuntimeGuestContractTests(unittest.TestCase):
         self.assertFalse(run.exists(), "runtime run directory must be unique")
         stage = run / "src"
         stage.mkdir(parents=True)
+        if not os.environ.get("DM_TEST_OUTPUT_ROOT"):
+            self.addCleanup(shutil.rmtree, run, ignore_errors=True)
         overlay_platform = ROOT / "dm/platform/android"
         live_platform = LIVE / "dm/platform/android"
         for name in ("module_runtime.cpp", "module_runtime.h", "guest_abi.h",

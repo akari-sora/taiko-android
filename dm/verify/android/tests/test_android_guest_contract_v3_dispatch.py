@@ -300,8 +300,28 @@ def build_synthetic_v3_sdk() -> tuple[bytes, contract.GuestContractSourceSpec]:
     meta_tmp = parse_metadata(nso_tmp)
     # Mark long AbortImpl as SHN_UNDEF (section 0) and the 5 contracted symbols as section 1
     abort_idx = next(i for i, s in enumerate(meta_tmp.symbols) if s.name.startswith("_ZN2nn4diag6detail9AbortImpl"))
-    struct.pack_into("<I", raw_nso, 12, 0)  # disable segment hashes so we can edit dynsym shndx cleanly
+    struct.pack_into("<I", raw_nso, 12, 0)  # disable segment hashes so we can edit dynsym/dynamic cleanly
     write_image(raw_nso, meta_tmp.dynamic[6] + abort_idx * 24 + 6, "<H", 0)
+    # Add a DT_RELA table (1 R_AARCH64_RELATIVE entry) so jmprel_offset_index == 1 > 0
+    dt_rela_off = (meta_tmp.dynamic[23] + meta_tmp.dynamic[2] + 7) & -8
+    write_image(raw_nso, dt_rela_off, "<QQq", builder.DATA + 0x80, 1027, 0x100)
+    dyn_entries = [
+        (5, meta_tmp.dynamic[5]),
+        (10, meta_tmp.dynamic[10]),
+        (6, meta_tmp.dynamic[6]),
+        (11, 24),
+        (4, meta_tmp.dynamic[4]),
+        (12, meta_tmp.dynamic[12]),
+        (7, dt_rela_off),
+        (8, 24),
+        (9, 24),
+        (23, meta_tmp.dynamic[23]),
+        (2, meta_tmp.dynamic[2]),
+        (20, 7),
+        (0, 0),
+    ]
+    for idx, (d_tag, d_val) in enumerate(dyn_entries):
+        write_image(raw_nso, builder.DATA + 0x400 + idx * 16, "<qQ", d_tag, d_val)
     source = bytes(raw_nso)
     nso = parse_nso(source)
     metadata = parse_metadata(nso)
@@ -316,7 +336,7 @@ def build_synthetic_v3_sdk() -> tuple[bytes, contract.GuestContractSourceSpec]:
         "nnosUnlockMutex": (0x400, 0x404, 1, fde_map[0x400], cie_off),
         "__nnmusl_UnlockLock": (0x600, 0x604, 1, fde_map[0x600], cie_off),
     }
-    for rel_idx, (plt_pc, got_off, name) in enumerate(plts[:5]):
+    for rel_idx, (plt_pc, got_off, name) in enumerate(plts[:5], start=1):
         sym_idx, sym = sym_by_name[name]
         st_name = struct.unpack_from("<I", nso.image, metadata.dynamic[6] + sym_idx * 24)[0]
         f_start, f_end, eh_kind, fde_o, cie_o = target_ranges[name]
@@ -592,6 +612,22 @@ class GuestContractDispatchTests(unittest.TestCase):
         audit = report["guest_contract_audit"]
         package_sha = bytes.fromhex(audit["package_sha256"])
 
+        # Build a canonical empty (0/0) checked-stack DMAMOD03 'main' module for multi-module graph verification
+        main_raw = bytearray(self.synth_source)
+        # Replace exclusive instructions in 0x300..0x350 and 0x51C..0x534 with NOPs so 'main' has 0 retire/exact records
+        for nop_pc in (0x318, 0x328, 0x330, 0x33C, 0x51C, 0x528, 0x52C):
+            write_image(main_raw, nop_pc, "<I", 0xD503201F)
+        main_package, main_report = importer.import_module(
+            bytes(main_raw),
+            "main",
+            package_version=3,
+            indirect_policy="guarded-host",
+            checked_stack=True,
+        )
+        self.assertEqual(main_package[:8], b"DMAMOD03")
+        self.assertNotIn("guest_contract_audit", main_report)
+        main_sha = hashlib.sha256(main_package).digest()
+
         if EVIDENCE is not None:
             run = EVIDENCE / "native-runs" / ("dmamod03-dispatch-" + uuid.uuid4().hex)
             run.mkdir(parents=True)
@@ -627,6 +663,8 @@ class GuestContractDispatchTests(unittest.TestCase):
             (
                 cpp_bytes("lowered_package", package),
                 cpp_bytes("package_sha", package_sha),
+                cpp_bytes("empty_main_package", main_package),
+                cpp_bytes("empty_main_sha", main_sha),
                 cpp_bytes("source_sha", bytes.fromhex(audit["source_sha256"])),
                 cpp_bytes("build_id", bytes.fromhex(audit["build_id"])),
                 cpp_bytes("recipe_sha", bytes.fromhex(audit["toolset_recipe_sha256"])),
@@ -695,6 +733,16 @@ std::unique_ptr<ModulePackage> decode_admitted() {
     return out;
 }
 
+std::unique_ptr<ModulePackage> decode_empty_main() {
+    std::unique_ptr<ModulePackage> out;
+    std::string error;
+    if (!decode_package(empty_main_package, sizeof(empty_main_package), empty_main_sha, &out, &error)) {
+        std::cerr << "decode_empty_main failed: " << error << "\n";
+        std::abort();
+    }
+    return out;
+}
+
 struct ResolverState {
     std::unordered_map<std::string, unsigned> forced_queries;
     std::unordered_map<std::string, unsigned> ordinary_queries;
@@ -723,7 +771,7 @@ bool tracking_resolver(const char* name, bool forced_only, uintptr_t* address, v
 
 int main() {
     // 1. Positive load: single forced query per exact record, zero ordinary queries for exact records,
-    // own-module definition written to GOT and frozen in FrozenGate.
+    // own-module definition written to GOT and frozen in FrozenGate, with non-empty DT_RELA (jmprel_offset_index == 1).
     Process process;
     ResolverState rstate{};
     {
@@ -740,6 +788,10 @@ int main() {
     const auto& mod = *process.modules_[0];
     const auto base = reinterpret_cast<uintptr_t>(mod.mapping.base);
     assert(mod.mapping.sealed);
+    // Verify DT_RELA (index 0, R_AARCH64_RELATIVE at 0x20080 with addend 0x100) was bound before DT_JMPREL (indices 1..6)
+    uint64_t rela0_val = 0;
+    std::memcpy(&rela0_val, static_cast<const uint8_t*>(mod.mapping.base) + 0x20080, sizeof(rela0_val));
+    assert(rela0_val == base + 0x100);
     const char* exact_names[5] = {
         "_ZN2nn2os11UnlockMutexEPNS0_9MutexTypeE",
         "strcmp",
@@ -750,6 +802,7 @@ int main() {
     const uint64_t expected_targets[5] = {0x200, 0x280, 0x300, 0x400, 0x600};
     const uint64_t expected_gots[5] = {0x20000, 0x20008, 0x20010, 0x20018, 0x20020};
     for (int i = 0; i < 5; ++i) {
+        assert(mod.package->exact_guest_records[i].relocation_index == static_cast<uint32_t>(i + 1));
         assert(rstate.forced_queries[exact_names[i]] == 1);
         assert(rstate.ordinary_queries[exact_names[i]] == 0);
         uint64_t got_val = 0;
@@ -795,7 +848,35 @@ int main() {
     }
     process.modules_[0]->mapping.sealed = true;
 
-    // 4. Negative load: forced resolver hit must fail closed even if it returns the exact numeric address
+    // 4. Multi-module v3 graph: canonical empty v3 module ('main' 0/0) + lowered v3 module ('sdk' 5/2)
+    {
+        auto main_pkg = decode_empty_main();
+        auto sdk_pkg = decode_admitted();
+        assert(main_pkg->exact_guest_records.empty() && main_pkg->returning_retire_records.empty());
+        std::vector<std::unique_ptr<ModulePackage>> multi_graph;
+        multi_graph.push_back(std::move(main_pkg));
+        multi_graph.push_back(std::move(sdk_pkg));
+        ResolverState multi_state{};
+        std::string error;
+        Process multi_proc;
+        if (!multi_proc.load(std::move(multi_graph), tracking_resolver, &multi_state, &error)) {
+            std::cerr << "multi-module v3 Process::load failed: " << error << "\n";
+            std::abort();
+        }
+        assert(multi_proc.modules_.size() == 2);
+        const auto& sdk_mod = *multi_proc.modules_[1];
+        const auto sdk_base = reinterpret_cast<uintptr_t>(sdk_mod.mapping.base);
+        const auto multi_gen = multi_proc.load_generation();
+        for (int i = 0; i < 5; ++i) {
+            const auto& rec = sdk_mod.package->exact_guest_records[i];
+            const uint64_t return_pc = sdk_base + rec.gate_return_offset;
+            const DmGuestGate* gate = Process::gate_resolver(&multi_proc, return_pc);
+            assert(gate != nullptr);
+            assert(multi_proc.exact_guest_site(return_pc, gate, sdk_base + rec.same_module_target_offset, multi_gen));
+        }
+    }
+
+    // 5. Negative load: forced resolver hit must fail closed even if it returns the exact numeric address
     for (int i = 0; i < 5; ++i) {
         auto pkg = decode_admitted();
         std::vector<std::unique_ptr<ModulePackage>> graph;
@@ -808,7 +889,7 @@ int main() {
         assert(!p2.load(std::move(graph), tracking_resolver, &bad_state, &error));
     }
 
-    // 5. Negative load: mutated post-decode retire stub (CLREX removed) or source BL changed to B must fail closed
+    // 6. Negative load: mutated post-decode retire stub (CLREX removed) or source BL changed to B must fail closed
     {
         auto pkg = decode_admitted();
         const uint64_t stub_off = pkg->returning_retire_records[0].reserved_stub_offset;
